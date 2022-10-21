@@ -12,8 +12,6 @@ from easydict import EasyDict
 import numpy as np
 import src.modeling.data.config as cfg
 from src.modeling.pointnet2.pointnet2_modules import Pointnet2Backbone, PointnetSAModule
-from src.utils.point_ops import INTRINSICS
-from openpoints.models.backbone.pointnext import PointNextEncoder
 from src.modeling.bert.transformer import Transformer
 
 class Graphormer_Body_Network(torch.nn.Module):
@@ -111,7 +109,7 @@ class Graphormer_Body_Network(torch.nn.Module):
             return cam_param, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 
 
-class mmGraphormer(Graphormer_Body_Network):
+class FusionGraphormer(Graphormer_Body_Network):
     '''
     End-to-end Graphormer network for human pose and mesh reconstruction from a single image.
     '''
@@ -135,12 +133,6 @@ class mmGraphormer(Graphormer_Body_Network):
         # self.pointnet2 = PointnetSAModule(npoint=49, radius=0.4, nsample=128, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
         # self.point_feat_num_dim = torch.nn.Linear(49, 1)
 
-        # if args.use_pointnext:
-        #     with open('cfgs/modelnet40ply2048/pointnext-s.yaml', 'r') as f:
-        #         data = yaml.load(f.read(), Loader=yaml.FullLoader)
-        #     kwargs = EasyDict(data['model']['encoder_args'])
-        #     self.pointnext = PointNextEncoder(**kwargs)
-        #     self.point_feat_dim = torch.nn.Linear(1024, 2048)
         self.point_feat_dim = torch.nn.Linear(2048, 1024)
             
         self.point_embedding = torch.nn.Linear(3, 2051)
@@ -181,7 +173,7 @@ class mmGraphormer(Graphormer_Body_Network):
             image_mask = np.ones((batch_size, 1, 1, 1))
             point_mask = np.ones((batch_size, 1, 1))
             pb = np.random.random_sample(2)
-            masked_num = np.floor(pb * self.mask_ratio * batch_size, ) # at most x% of the vertices could be masked
+            masked_num = np.floor(pb * self.mask_ratio * batch_size,) # at most x% could be masked
             image_indices = np.random.choice(np.arange(batch_size),replace=False,size=int(masked_num[0]))
             point_indices = list(np.random.choice(np.arange(batch_size),replace=False,size=int(masked_num[1])))
             for idx in image_indices:

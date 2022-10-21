@@ -4,18 +4,25 @@ import torch
 import numpy as np
 import open3d as o3d
 
-INTRINSIC = np.asarray([
-    [969.48345947265625,    0,                  1024.9678955078125],
-    [0,                     968.99578857421875, 781.4013671875],
-    [0,                     0,                  1]])
+INTRINSIC = {
+    'master': np.asarray([
+        [969.48345947265625,    0,                  1024.9678955078125],
+        [0,                     968.99578857421875, 781.4013671875],
+        [0,                     0,                  1]]),
+    'sub': np.asarray([
+        [972.07073974609375,    0,                  1021.4869384765625  ],
+        [0,                     971.651123046875,   780.25439453125     ],
+        [0,                     0,                  1                   ]
+    ])
+}
 
 
 class Sequence_Loader(object):
-    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, enabled_source=['radar', 'image', 'mesh'], **kwargs) -> None:
+    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, resource=['radar', 'master_image', 'mesh'], **kwargs) -> None:
         self.seq_path = seq_path
         self.skip_head = skip_head
         self.skip_tail = skip_tail
-        self.enabled_source = enabled_source
+        self.resource = resource
         # load transformation matrix
         with open(os.path.join(seq_path, 'calib.txt')) as f:
             self.calib = eval(f.readline())
@@ -25,25 +32,32 @@ class Sequence_Loader(object):
 
     def __getitem__(self, idx: int):
         result = {}
-        if 'radar' in self.enabled_source:
+        if 'radar' in self.resource:
             result['radar'] = np.load(os.path.join(
                 self.seq_path, 'radar', 'frame_{}.npy'.format(idx+self.skip_head)))
-        if 'image' in self.enabled_source:
-            result['image'] = cv2.imread(os.path.join(
-                self.seq_path, 'image', 'frame_{}.png'.format(idx+self.skip_head)))
-        if 'mesh' in self.enabled_source:
+        if 'master_image' in self.resource:
+            result['master_image'] = cv2.imread(os.path.join(
+                self.seq_path, 'image', 'master', 'frame_{}.png'.format(idx+self.skip_head)))
+        if 'sub_image' in self.resource:
+            result['sub_image'] = cv2.imread(os.path.join(
+                self.seq_path, 'image', 'sub', 'frame_{}.png'.format(idx+self.skip_head)))
+        if 'master_depth' in self.resource:
+            result['master_depth'] = np.load(os.path.join(
+                self.seq_path, 'depth_pcl', 'master', 'frame_{}.npy'.format(idx+self.skip_head)))
+        if 'sub_depth' in self.resource:
+            result['sub_depth'] = np.load(os.path.join(
+                self.seq_path, 'depth_pcl', 'sub', 'frame_{}.npy'.format(idx+self.skip_head)))
+        if 'mesh' in self.resource:
             result['mesh'] = np.load(os.path.join(
                 self.seq_path, 'mesh', 'frame_{}.npz'.format(idx+self.skip_head)))
-        if 'depth_pcl' in self.enabled_source:
-            result['depth_pcl'] = np.load(os.path.join(
-                self.seq_path, 'pcl', 'frame_{}.npy'.format(idx+self.skip_head)))
+            
         return result
 
 
-def project_pcl(pcl):
+def project_pcl(pcl, cam='master'):
     pcl_2d = []
     for p in pcl:
-        point_2d = (INTRINSIC @ p/p[2])[:2]
+        point_2d = (INTRINSIC[cam] @ p/p[2])[:2]
         pcl_2d.append(point_2d)
     pcl_2d = np.asarray(pcl_2d)
     pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
@@ -69,7 +83,7 @@ def filter_pcl(bounding_pcl: np.ndarray, target_pcl: np.ndarray, bound: float = 
     return target_pcl[index]
 
 
-def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:bool=False, margin:float=0.2, square:bool=False):
+def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:bool=False, margin:float=0.2, square:bool=False, cam='mas'):
     """
     Crop the person area of image
     """
@@ -92,7 +106,7 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
     box_2d = []
     # project 3d bounding box to 2d image plane
     for p in box_3d:
-        box_2d.append((INTRINSIC @ p/p[2])[:2])
+        box_2d.append((INTRINSIC[cam] @ p/p[2])[:2])
     box_2d = np.floor(box_2d).astype(int)
     box_2d[:, [0, 1]] = box_2d[:, [1, 0]]
     box_min = box_2d.min(0)

@@ -206,14 +206,9 @@ class EncoderBlock(BertPreTrainedModel):
         self.embeddings = BertEmbeddings(config)
         self.encoder = GraphormerEncoder(config)
         self.pooler = BertPooler(config)
-        # TODO 726 -> 758
-        # config.max_position_embeddings = 758
-        # config.max_position_embeddings = 726
-        # config.max_position_embeddings = 709
         config.max_position_embeddings = 775
-        # config.max_position_embeddings = 822
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.img_dim = config.img_feature_dim 
+        self.img_dim = config.img_feature_dim
 
         try:
             self.use_img_layernorm = config.use_img_layernorm

@@ -1,9 +1,6 @@
 """
-Copyright (c) Microsoft Corporation.
-Licensed under the MIT license.
-
 Training and evaluation codes for 
-3D human body mesh reconstruction from an image
+3D human body mesh reconstruction from images and point clouds
 """
 
 from __future__ import absolute_import, division, print_function
