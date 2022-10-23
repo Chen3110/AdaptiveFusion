@@ -4,19 +4,10 @@ Licensed under the MIT license.
 
 """
 
-from multiprocessing import Process
-import pickle
 import cv2
-import math
-import json
-from PIL import Image
 import os.path as op
 import numpy as np
-import code
 
-from src.utils.tsv_file import TSVFile, CompositeTSVFile
-from src.utils.tsv_file_ops import load_linelist_file, load_from_yaml_file, find_file_path_in_yaml
-from src.utils.image_ops import img_from_base64, crop, flip_img, flip_pose, flip_kp, transform, rot_aa
 import torch
 import torchvision.transforms as transforms
 from src.datasets.utils import *
@@ -27,20 +18,19 @@ class FusionDataset():
         self.normalize_img = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         self.img_res = 224
-        self.data_path = os.path.join(args.data_path, 'train') if args.train else os.path.join(args.data_path, 'test')
+        self.data_path = op.join(args.data_path, 'train') if args.train else op.join(args.data_path, 'test')
         self.seq_idxes = eval(args.seq_idxes) if args.seq_idxes else range(20)
         self.args = args
-        self.resource = args.resource.split(',')
         self.init_index_map()
             
     def init_index_map(self):
         self.index_map = [0,]
         if self.args.train:
             seq_dirs = ['sequence_{}'.format(i) for i in self.seq_idxes]
-            self.seq_paths = [os.path.join(self.data_path, p) for p in seq_dirs]
+            self.seq_paths = [op.join(self.data_path, p) for p in seq_dirs]
         else:
             seq_dirs = ['sequence_{}'.format(i) for i in range(2)]
-            self.seq_paths = [os.path.join(self.data_path, self.args.test_scene, p) for p in seq_dirs]
+            self.seq_paths = [op.join(self.data_path, self.args.test_scene, p) for p in seq_dirs]
         
         print('Data path: ', self.seq_paths)
 
@@ -48,7 +38,7 @@ class FusionDataset():
         self.full_data = {}
         for path in self.seq_paths:
             # init result loader, reindex
-            seq_loader = Sequence_Loader(path, self.args.skip_head, self.args.skip_tail, resource=self.resource)
+            seq_loader = Sequence_Loader(path, self.args.skip_head, self.args.skip_tail, resource=self.args.resource)
             self.full_data.update({path:seq_loader})
             self.index_map.append(self.index_map[-1] + len(seq_loader))
             
@@ -58,17 +48,6 @@ class FusionDataset():
                 frame_idx = global_idx - self.index_map[seq_idx]
                 return seq_idx, frame_idx
         raise IndexError
-
-    def pad_pcl(self, data, return_choices=False):
-        if data.shape[0] > self.args.num_points:
-            r = np.random.choice(data.shape[0], size=self.args.num_points, replace=False)
-        else:
-            repeat, residue = self.args.num_points // data.shape[0], self.args.num_points % data.shape[0]
-            r = np.random.choice(data.shape[0], size=residue, replace=False)
-            r = np.concatenate([np.arange(data.shape[0]) for _ in range(repeat)] + [r], axis=0)
-        if return_choices:
-            return data[r, :], r
-        return data[r, :]
         
     def mosh_pose_transform(self, trans, root_orient, root_joint, trans_mat):
         mosh_offset = root_joint - trans
@@ -78,70 +57,72 @@ class FusionDataset():
         return new_trans, new_orient
     
     def process_image(self, image, joints):
-        img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        # Crop person area using joints
-        img = crop_image(joints, img, square=True)
-        img = cv2.resize(img, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
-        img = np.transpose(img.astype('float32'), (2,0,1))/255.0
+        # img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # # crop person area using joints
+        # img = crop_image(joints, img, square=True)
+        # img = cv2.resize(img, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
+        # img = np.transpose(img.astype('float32'), (2,0,1))/255.0
+        img = image.astype('float32')/255.0
         img = torch.from_numpy(img).float()
         transformed_img = self.normalize_img(img)
         return transformed_img
     
-    def process_pcl(self, pcl, joints, trans_mat):
-        # Filter person pcl using joints
-        depth_pcl = filter_pcl(joints, depth_pcl)
+    def process_pcl(self, pcl, joints, trans_mat, padding_points=1024, mask_ratio=0.):
+        # filter person pcl using joints
+        pcl = filter_pcl(joints, pcl)
         if not pcl.shape[0]:
             pcl = np.zeros([1, 6], dtype=np.float32)
+        if mask_ratio:
+            mask_indices = gen_mask_indices(pcl.size[0], mask_ratio)
+            pcl = np.delete(pcl, mask_indices)
         if trans_mat is not None:
             trans_pcl = (pcl[:,:3] - trans_mat['t']) @ trans_mat['R']
             pcl = np.hstack((trans_pcl, pcl[:,3:]))
-        # Padding pcl
-        pcl = self.pad_pcl(pcl)
+        # padding pcl
+        pcl = pad_pcl(pcl, padding_points)
         pcl = torch.from_numpy(pcl).float()
         return pcl
     
-    def gen_mask(self, num_mask, mask_percent):
-        mvm_mask = np.ones((num_mask,1))
+    def gen_mask(self, num_mask, mask_ratio):
+        mask = np.ones((num_mask))
         if self.args.train:
-            pb = np.random.random_sample()
-            masked_num = int(pb * mask_percent * num_mask) # at most x% of the vertices could be masked
-            indices = np.random.choice(np.arange(num_mask),replace=False,size=masked_num)
-            mvm_mask[indices,:] = 0.0
-        return torch.from_numpy(mvm_mask).float()
+            indices = gen_mask_indices(num_mask, mask_ratio)
+            mask[indices] = 0.0
+        return torch.from_numpy(mask).float()
     
     def load_data(self, seq_loader, frame_idx):
         if isinstance(seq_loader, list):
             return seq_loader[frame_idx]
         frame = seq_loader[frame_idx]
-        # Get mesh parameters
+        # get mesh parameters
         mesh = dict(frame['mesh'])
         pose = mesh['pose']
         betas = mesh['shape']
-        gender = 'none'
+        gender = 'None'
         joints = mesh['joints'][:22]
 
-        # Process image
-        mas_img = None
-        if 'master_image' in self.resource:
+        # process image
+        mas_img = []
+        if 'master_image' in self.args.resource:
             trans_mat_mas = seq_loader.calib['kinect_master']
             joints_mas = (joints - trans_mat_mas['t']) @ trans_mat_mas['R']
             mas_img = self.process_image(frame['master_image'], joints_mas)
 
-        sub_img = None
-        if 'sub_image' in self.resource:
+        sub_img = []
+        if 'sub_image' in self.args.resource:
             trans_mat_sub = seq_loader.calib['kinect_sub']
             joints_sub = (joints - trans_mat_sub['t']) @ trans_mat_sub['R']
             sub_img = self.process_image(frame['master_image'], joints_sub)
         
-        # Transform mesh param and joints to the kinect coordinate if need
+        # transform mesh param and joints to the kinect coordinate if need
         trans_joints = joints
         trans_pose = pose
         trans_mat_to_cam = None
         if self.args.trans_coor_to_cam:
-            if 'master_image' in self.resource:
+            if 'master_image' in self.args.resource:
                 trans_mat_to_cam = trans_mat_mas
                 trans_joints = joints_mas
-            elif 'sub_image' in self.resource:
+            elif 'sub_image' in self.args.resource:
                 trans_mat_to_cam = trans_mat_sub
                 trans_joints = joints_sub
             else:
@@ -150,44 +131,41 @@ class FusionDataset():
             trans, root_orient = self.mosh_pose_transform(pose[:3], pose[3:6], joints[0], rev_trans_mat)
             trans_pose = np.hstack((trans, root_orient.reshape(-1), pose[6:]))
                 
-        # Get 3d joints center
+        # get 3d joints center
         joint_center = ((trans_joints.max(axis=0) + trans_joints.min(axis=0))/2)[:3]
         
-        # Process radar pcl
-        radar_pcl = None
-        if 'radar' in self.resource:
+        # process radar pcl
+        radar_pcl = []
+        if 'radar' in self.args.resource:
             radar_pcl = frame['radar']
             radar_pcl[:,3:] /= np.array([5e-38, 5., 150.])
             radar_pcl = self.process_pcl(radar_pcl, joints, trans_mat_to_cam)
             
-        # Process depth pcl
-        mas_depth = None
-        if 'master_depth' in self.resource:
+        # process depth pcl
+        mask_ratio = 0.9 if self.args.train else 0.
+        mas_depth = []
+        if 'master_depth' in self.args.resource:
             mas_depth = frame['master_depth']
-            mas_depth = self.process_pcl(mas_depth, joints, trans_mat_to_cam)
+            mas_depth = self.process_pcl(mas_depth, joints, trans_mat_to_cam, padding_points=4096, mask_ratio=mask_ratio)
         
-        sub_depth = None
-        if 'sub_depth' in self.resource:
+        sub_depth = []
+        if 'sub_depth' in self.args.resource:
             sub_depth = frame['sub_depth']
-            sub_depth = self.process_pcl(sub_depth, joints, trans_mat_to_cam)
+            sub_depth = self.process_pcl(sub_depth, joints, trans_mat_to_cam, padding_points=4096, mask_ratio=mask_ratio)
             
-        # Masking tokens
-        joint_mask = self.gen_mask(num_mask=22, mask_percent=0.3)
-        vert_mask = self.gen_mask(num_mask=655, mask_percent=0.3)
-        grid_mask = self.gen_mask(num_mask=49, mask_percent=0)
-        cluster_mask = self.gen_mask(num_mask=32, mask_percent=1)
+        # masking tokens
+        joint_mask = self.gen_mask(num_mask=22, mask_ratio=0.3).unsqueeze(-1)
+        vert_mask = self.gen_mask(num_mask=655, mask_ratio=0.3).unsqueeze(-1)
         
-        # Return result
+        # return result
         result = {}
         result['pose'] = torch.from_numpy(trans_pose).float()
         result['betas'] = torch.from_numpy(betas).float()
         result['joints_3d'] = torch.from_numpy(trans_joints).float()
         result['root_pelvis'] = torch.from_numpy(trans_joints[0]).float()
 
-        result['mjm_mask'] = joint_mask
-        result['mvm_mask'] = vert_mask
-        result['grid_mask'] = grid_mask
-        result['cluster_mask'] = cluster_mask
+        result['joint_mask'] = joint_mask
+        result['vert_mask'] = vert_mask
 
         result['center'] = np.asarray(joint_center).astype(np.float32)
         result['gender'] = gender

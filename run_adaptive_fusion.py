@@ -20,12 +20,13 @@ from openpyxl import load_workbook, Workbook
 from src.datasets.utils import crop_image, project_pcl
 
 from src.modeling.bert import BertConfig, Graphormer
-import src.modeling.bert.e2e_body_network as Models
+import src.modeling.model as Models
 from src.modeling._smpl import SMPL, Mesh, SMPLXModel, SMPLX_MODEL_NEUTRAL_PATH
 from src.modeling.hrnet.hrnet_cls_net_gridfeat import get_cls_net_gridfeat
 from src.modeling.hrnet.config import config as hrnet_config
 from src.modeling.hrnet.config import update_config as hrnet_update_config
 from src.datasets.build import make_data_loader
+from src.modeling.pointnet2.pointnet2_modules import PointnetSAModule
 
 from src.utils.logger import setup_logger
 from src.utils.comm import synchronize, is_main_process, get_rank, all_gather
@@ -33,7 +34,7 @@ from src.utils.miscellaneous import mkdir, set_seed
 from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.renderer import Renderer
 from src.utils.metric_pampjpe import reconstruction_error
-import src.datasets.human_mesh_tsv as Datasets
+import src.datasets.dataset as Datasets
 from src.utils.loss import LossManager
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
@@ -115,28 +116,21 @@ def keypoint_2d_loss(criterion_keypoints, pred_keypoints_2d, gt_keypoints_2d, ha
     loss = (criterion_keypoints(pred_keypoints_2d, gt_keypoints_2d)).mean()
     return loss
 
-def keypoint_3d_loss(criterion_keypoints, pred_keypoints_3d, gt_keypoints_3d, has_pose_3d, device):
+def keypoint_3d_loss(criterion_keypoints, pred_keypoints_3d, gt_keypoints_3d, device):
     """
     Compute 3D keypoint loss if 3D keypoint annotations are available.
     """
-    # conf = gt_keypoints_3d[:, :, -1].unsqueeze(-1).clone()
-    # gt_keypoints_3d = gt_keypoints_3d[:, :, :-1].clone()
-    gt_keypoints_3d = gt_keypoints_3d[has_pose_3d == 1]
-    # conf = conf[has_pose_3d == 1]
-    pred_keypoints_3d = pred_keypoints_3d[has_pose_3d == 1]
     if len(gt_keypoints_3d) > 0:
         return (criterion_keypoints(pred_keypoints_3d, gt_keypoints_3d)).mean()
     else:
         return torch.FloatTensor(1).fill_(0.).to(device) 
 
-def vertices_loss(criterion_vertices, pred_vertices, gt_vertices, has_smpl, device):
+def vertices_loss(criterion_vertices, pred_vertices, gt_vertices, device):
     """
     Compute per-vertex loss if vertex annotations are available.
     """
-    pred_vertices_with_shape = pred_vertices[has_smpl == 1]
-    gt_vertices_with_shape = gt_vertices[has_smpl == 1]
-    if len(gt_vertices_with_shape) > 0:
-        return criterion_vertices(pred_vertices_with_shape, gt_vertices_with_shape)
+    if len(gt_vertices) > 0:
+        return criterion_vertices(pred_vertices, gt_vertices)
     else:
         return torch.FloatTensor(1).fill_(0.).to(device) 
     
@@ -273,66 +267,70 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
     log_loss_vertices = AverageMeter()
     log_eval_metrics = EvalMetricsLogger()
 
-    for iteration, (pcls, images, annotations) in enumerate(train_dataloader):
+    for iteration, data_dict in enumerate(train_dataloader):
         # gc.collect()
         # torch.cuda.empty_cache()
         Graphormer_model.train()
         iteration += start_iter + 1
         epoch = iteration // iters_per_epoch
-        batch_size = images.size(0)
         adjust_learning_rate(optimizer, epoch, args)
         data_time.update(time.time() - end)
 
-        images = images.cuda(args.device)
-        pcls = pcls.cuda(args.device)
+        # normalize gt joints
+        gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
+        gt_3d_pelvis = data_dict['root_pelvis'].cuda(args.device)[:,None,:]
+        gt_3d_joints -= gt_3d_pelvis
+        batch_size = gt_3d_joints.size(0)
 
-        gt_3d_joints = annotations['joints_3d'].cuda(args.device)
-        gt_3d_pelvis = annotations['root_pelvis'].cuda(args.device)[:,None,:]
-        gt_3d_joints = gt_3d_joints - gt_3d_pelvis
-        has_3d_joints = annotations['has_3d_joints'].cuda(args.device)
-
-        gt_pose = annotations['pose'].cuda(args.device)
-        gt_betas = annotations['betas'].cuda(args.device)
-        has_smpl = annotations['has_smpl'].cuda(args.device)
-        mjm_mask = annotations['mjm_mask'].cuda(args.device)
-        mvm_mask = annotations['mvm_mask'].cuda(args.device)
-        grid_mask = annotations['grid_mask'].cuda(args.device)
-        cluster_mask = annotations['cluster_mask'].cuda(args.device)
+        gt_pose = data_dict['pose'].cuda(args.device)
+        gt_betas = data_dict['betas'].cuda(args.device)
+        joint_mask = data_dict['joint_mask'].cuda(args.device)
+        vert_mask = data_dict['vert_mask'].cuda(args.device)
 
         # generate simplified mesh
         gt_vertices = smpl(gt_pose, gt_betas)['verts']
         gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices, n1=0, n2=2)
         gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
 
-        # normalize gt based on smpl's pelvis 
-        gt_vertices_sub2 = gt_vertices_sub2 - gt_3d_pelvis
-        gt_vertices_sub = gt_vertices_sub - gt_3d_pelvis 
-        gt_vertices = gt_vertices - gt_3d_pelvis
-
-        pcls[:,:,:3] -= gt_3d_pelvis
+        # normalize gt based on smpl's pelvis
+        gt_vertices_sub2 -= gt_3d_pelvis
+        gt_vertices_sub -= gt_3d_pelvis
+        gt_vertices -= gt_3d_pelvis
+        
+        if 'radar' in args.resource:
+            data_dict['radar'].cuda(args.device)
+            data_dict['radar'][:,:,:3] -= gt_3d_pelvis
+        if 'master_image' in args.resource:
+            data_dict['master_image'].cuda(args.device)
+        if 'sub_image' in args.resource:
+            data_dict['sub_image'].cuda(args.device)
+        if 'master_depth' in args.resource:
+            data_dict['master_depth'].cuda(args.device)
+            data_dict['master_depth'][:,:,:3] -= gt_3d_pelvis
+        if 'sub_depth' in args.resource:
+            data_dict['sub_depth'].cuda(args.device)
+            data_dict['sub_depth'][:,:,:3] -= gt_3d_pelvis
 
         # prepare masks for mask vertex/joint modeling
-        mjm_mask_ = mjm_mask.expand(-1,-1,2051)
-        mvm_mask_ = mvm_mask.expand(-1,-1,2051)
-        grid_mask_ = grid_mask.expand(-1,-1,2051)
-        cluster_mask_ = cluster_mask.expand(-1,-1,2051)
-        meta_masks = torch.cat([mjm_mask_, mvm_mask_, grid_mask_, cluster_mask_], dim=1)
+        joint_mask_ = joint_mask.expand(-1,-1,2051)
+        vert_mask_ = vert_mask.expand(-1,-1,2051)
+        meta_masks = torch.cat([joint_mask_, vert_mask_], dim=1)
 
         # forward-pass
-        pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = Graphormer_model(args, images, smpl, mesh_sampler, meta_masks=meta_masks, is_train=True, pcls=pcls)
+        pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = Graphormer_model(args, data_dict, smpl, mesh_sampler, meta_masks=meta_masks, is_train=True)
 
         # compute 3d joint loss  (where the joints are directly output from transformer)
-        loss_3d_joints = keypoint_3d_loss(criterion_keypoints, pred_3d_joints, gt_3d_joints, has_3d_joints, args.device)
+        loss_3d_joints = keypoint_3d_loss(criterion_keypoints, pred_3d_joints, gt_3d_joints, args.device)
         # compute 3d vertex loss
-        loss_vertices = (args.vloss_w_sub2 * vertices_loss(criterion_vertices, pred_vertices_sub2, gt_vertices_sub2, has_smpl, args.device) + \
-                            args.vloss_w_sub * vertices_loss(criterion_vertices, pred_vertices_sub, gt_vertices_sub, has_smpl, args.device) + \
-                            args.vloss_w_full * vertices_loss(criterion_vertices, pred_vertices, gt_vertices, has_smpl, args.device))
+        loss_vertices = (args.vloss_w_sub2 * vertices_loss(criterion_vertices, pred_vertices_sub2, gt_vertices_sub2, args.device) + \
+                            args.vloss_w_sub * vertices_loss(criterion_vertices, pred_vertices_sub, gt_vertices_sub, args.device) + \
+                            args.vloss_w_full * vertices_loss(criterion_vertices, pred_vertices, gt_vertices, args.device))
 
         score_loss = torch.mean(torch.abs(pred_dict.get('pred_score', torch.zeros(1, device=args.device))))
-        image_joints_loss = keypoint_3d_loss(criterion_keypoints, pred_dict.get('pred_image_joints', gt_3d_joints), gt_3d_joints, has_3d_joints, args.device)
-        point_joints_loss = keypoint_3d_loss(criterion_keypoints, pred_dict.get('pred_point_joints', gt_3d_joints), gt_3d_joints, has_3d_joints, args.device)
-        image_verts_loss = vertices_loss(criterion_vertices, pred_dict.get('pred_image_verts', gt_vertices_sub2), gt_vertices_sub2, has_smpl, args.device)
-        point_verts_loss = vertices_loss(criterion_vertices, pred_dict.get('pred_point_verts', gt_vertices_sub2), gt_vertices_sub2, has_smpl, args.device)
+        image_joints_loss = keypoint_3d_loss(criterion_keypoints, pred_dict.get('pred_image_joints', gt_3d_joints), gt_3d_joints, args.device)
+        point_joints_loss = keypoint_3d_loss(criterion_keypoints, pred_dict.get('pred_point_joints', gt_3d_joints), gt_3d_joints, args.device)
+        image_verts_loss = vertices_loss(criterion_vertices, pred_dict.get('pred_image_verts', gt_vertices_sub2), gt_vertices_sub2, args.device)
+        point_verts_loss = vertices_loss(criterion_vertices, pred_dict.get('pred_point_verts', gt_vertices_sub2), gt_vertices_sub2, args.device)
         
         loss_manager.update_loss("score_loss", args.score_loss_weight*score_loss)
         loss_manager.update_loss("image_joints_loss", args.joints_loss_weight*image_joints_loss)
@@ -446,7 +444,7 @@ def run_eval_general(args, val_dataloader, Graphormer_model, smpl, mesh_sampler,
     )
     return
 
-def res_generator(pcls, pred_vertices, gt_vertices, face, pred_verts_sub2, pred_joints, attention, seed_points, joint_id, images, gt_pelvis, show_att=False, pause_at_start=False):
+def result_generator(pcls, pred_vertices, gt_vertices, face, pred_verts_sub2, pred_joints, attention, seed_points, joint_id, images, gt_pelvis, show_att=False, pause_at_start=False):
     for i in range(len(pcls)):
         print('frame_id:', i)
         res = dict(
@@ -488,7 +486,6 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
     smpl.eval()
     batch = 0
     with torch.no_grad():
-        # end = time.time()
         for i, (pcls, images, annotations) in enumerate(val_loader):
             batch_size = images.size(0)
             # compute output
@@ -543,7 +540,7 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
             if args.visual:
                 att = pred_dict.get('attention', [0])[-1]
                 seed_points = pred_dict.get('seed_points', None)
-                gen = res_generator(pcls[:,:,:3], pred_vertices, gt_vertices, smpl.f, pred_vertices_sub2, pred_3d_joints, 
+                gen = result_generator(pcls[:,:,:3], pred_vertices, gt_vertices, smpl.f, pred_vertices_sub2, pred_3d_joints, 
                                     att, seed_points, args.joint_id, annotations['orig_img'], gt_3d_pelvis, args.show_att, pause_at_start=True)
                 batch += 1
                 if batch > args.max_num_batch:
@@ -638,7 +635,9 @@ def main(args):
     logger = setup_logger("Graphormer", args.output_dir, get_rank())
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
-
+    args.resource = ['radar','master_image','master_depth','sub_image','sub_depth',] if args.train else args.resource.split(',')
+    if not args.resource:
+        raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
     smpl = SMPLXModel(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, device=args.device).to(args.device)
     mesh_sampler = Mesh()
@@ -705,30 +704,34 @@ def main(args):
             hrnet_yaml = 'models/hrnet/cls_hrnet_w40_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w40_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
-            backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
+            img_backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w40 model')
         elif args.arch=='hrnet-w64':
             hrnet_yaml = 'models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w64_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
-            backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
+            img_backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w64 model')
         else:
             print("=> using pre-trained model '{}'".format(args.arch))
-            backbone = models.__dict__[args.arch](pretrained=True)
+            img_backbone = models.__dict__[args.arch](pretrained=True)
             # remove the last fc layer
-            backbone = torch.nn.Sequential(*list(backbone.children())[:-2])
+            img_backbone = torch.nn.Sequential(*list(img_backbone.children())[:-2])
 
 
         trans_encoder = torch.nn.Sequential(*trans_encoder)
         total_params = sum(p.numel() for p in trans_encoder.parameters())
         logger.info('Graphormer encoders total parameters: {}'.format(total_params))
-        backbone_total_params = sum(p.numel() for p in backbone.parameters())
+        backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
+        
+        pcl_backbone = PointnetSAModule(npoint=32, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
+        
+        backbone = dict(image=img_backbone, point=pcl_backbone)
 
-        # build end-to-end Graphormer network (CNN backbone + multi-layer graphormer encoder)
+        # build end-to-end Graphormer network (backbone + multi-layer graphormer encoder)
         Model = getattr(Models, args.model)
-        _model = Model(args, config, backbone, trans_encoder, mesh_sampler)
+        _model = Model(backbone, trans_encoder)
 
         start_epoch = 0
         if args.resume_checkpoint!=None and args.resume_checkpoint!='None':
@@ -772,8 +775,7 @@ def main(args):
         run(args, train_dataloader, val_dataloader, _model, smpl, mesh_sampler, renderer, start_epoch)
         
     else:
-        val_dataloader = make_data_loader(args, dataset, 
-                                        args.distributed, is_train=False, scale_factor=args.img_scale_factor)
+        val_dataloader = make_data_loader(args, dataset, args.distributed, is_train=False, scale_factor=args.img_scale_factor)
         run_eval_general(args, val_dataloader, _model, smpl, mesh_sampler, renderer)
 
 
@@ -797,7 +799,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='ImmDataset')
     parser.add_argument('--num_points', type=int, default=1024)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
-    parser.add_argument('--resource', type=str, default='radar,master_image,master_depth,sub_image,mesh', help='input data')
+    parser.add_argument('--resource', type=str, default='radar,master_image,master_depth,sub_image', help='input data')
     parser.add_argument('--trans_coor_to_cam', action="store_true")
     #########################################################
     # Loading/saving checkpoints
@@ -872,7 +874,7 @@ def parse_args():
     parser.add_argument('--output_dim', type=int, default=3)
     parser.add_argument('--mask_ratio', type=float, default=0.3)
     parser.add_argument('--points_w_image_feat', action="store_true")
-    parser.add_argument('--wo_IGM', action="store_true")
+    parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--images_only', action="store_true")
     parser.add_argument('--points_only', action="store_true")
     parser.add_argument('--cat_global_feat', action="store_true")
