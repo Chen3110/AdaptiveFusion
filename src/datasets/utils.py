@@ -18,7 +18,7 @@ INTRINSIC = {
 
 
 class Sequence_Loader(object):
-    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, resource=['radar', 'master_image', 'mesh'], **kwargs) -> None:
+    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, resource=['radar', 'master_image'], **kwargs) -> None:
         self.seq_path = seq_path
         self.skip_head = skip_head
         self.skip_tail = skip_tail
@@ -47,9 +47,8 @@ class Sequence_Loader(object):
         if 'sub_depth' in self.resource:
             result['sub_depth'] = np.load(os.path.join(
                 self.seq_path, 'depth_pcl', 'sub', 'frame_{}.npy'.format(idx+self.skip_head)))
-        if 'mesh' in self.resource:
-            result['mesh'] = np.load(os.path.join(
-                self.seq_path, 'mesh', 'frame_{}.npz'.format(idx+self.skip_head)))
+        result['mesh'] = np.load(os.path.join(
+            self.seq_path, 'mesh', 'frame_{}.npz'.format(idx+self.skip_head)))
             
         return result
 
@@ -83,7 +82,19 @@ def filter_pcl(bounding_pcl: np.ndarray, target_pcl: np.ndarray, bound: float = 
     return target_pcl[index]
 
 
-def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:bool=False, margin:float=0.2, square:bool=False, cam='mas'):
+def pad_pcl(pcl, num_points, return_choices=False):
+    if pcl.shape[0] > num_points:
+        r = np.random.choice(pcl.shape[0], size=num_points, replace=False)
+    else:
+        repeat, residue = num_points // pcl.shape[0], num_points % pcl.shape[0]
+        r = np.random.choice(pcl.shape[0], size=residue, replace=False)
+        r = np.concatenate([np.arange(pcl.shape[0]) for _ in range(repeat)] + [r], axis=0)
+    if return_choices:
+        return pcl[r, :], r
+    return pcl[r, :]
+
+
+def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:bool=False, margin:float=0.2, square:bool=False, cam='master'):
     """
     Crop the person area of image
     """
@@ -191,3 +202,10 @@ def rodrigues_2_rot_mat(rvecs):
     R = torch.where(is_zero[:, None, None], identity_mat, Rs)
 
     return R.reshape(batch_size, -1)
+
+def gen_mask_indices(max_mask_num, mask_ratio, random_num=True):
+    pb = np.random.rand() if random_num else 1.
+    # at most x% of images could be masked
+    mask_num = np.floor(pb * mask_ratio * max_mask_num)
+    mask_indices = np.random.choice(np.arange(max_mask_num),replace=False,size=int(mask_num))
+    return mask_indices

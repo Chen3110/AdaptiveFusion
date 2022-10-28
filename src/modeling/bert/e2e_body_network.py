@@ -207,7 +207,7 @@ class FusionGraphormer(Graphormer_Body_Network):
         point_feat = self.point_feat_num_dim(cluster_feat).squeeze()
         
         # concatinate image/point feat and 3d mesh template
-        if args.wo_IGM:
+        if args.wo_GIM:
             fusion_feat = (image_feat + point_feat).view(batch_size,1,2048).expand(-1,ref_vertices.shape[-2],-1)
         elif args.images_only:
             fusion_feat = image_feat.view(batch_size, 1, 2048).expand(-1, ref_vertices.shape[-2], -1)

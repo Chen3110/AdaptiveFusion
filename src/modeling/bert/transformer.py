@@ -84,7 +84,7 @@ class Transformer(nn.Module):
                 Residual(PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout))),
                 Residual(PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout)))
             ]))
-    def forward(self, x, y):
+    def forward(self, x, y=None):
         for attn, ff in self.layers:
             attn_out = attn(x, y)
             output = ff(attn_out)

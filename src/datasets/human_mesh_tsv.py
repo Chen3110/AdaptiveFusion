@@ -339,7 +339,7 @@ class MeshTSVYamlDataset(MeshTSVDataset):
             img_file, label_file, hw_file, linelist_file, is_train, cv2_output=cv2_output, scale_factor=scale_factor)
 
 
-class mmBodyDataset(MeshTSVDataset):
+class ImmDataset(MeshTSVDataset):
     def __init__(self, data_path, is_train=True, test_scene='lab1', cv2_output=False, **kwargs):
         self.cv2_output = cv2_output
         self.normalize_img = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -449,12 +449,12 @@ class mmBodyDataset(MeshTSVDataset):
         if isinstance(seq_loader, list):
             return seq_loader[frame_idx]
         frame = seq_loader[frame_idx]
-        image = frame['image']
+        image = frame['master_image']
         orig_img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         radar_pcl = frame['radar']
         mesh = dict(frame['mesh'])
         joints = mesh['joints'][:22]
-        trans_mat = seq_loader.calib
+        trans_mat = seq_loader.calib['kinect_master']
         trans_joints = (joints - trans_mat['t']) @ trans_mat['R']
 
         center = ((trans_joints.max(axis=0) + trans_joints.min(axis=0))/2)[:3]
@@ -582,7 +582,7 @@ class mmBodyDataset(MeshTSVDataset):
 
 
 
-class DepthBodyDataset(mmBodyDataset):
+class DepthBodyDataset(ImmDataset):
     def __init__(self, data_path, is_train=True, test_scene='lab1', cv2_output=False, **kwargs):
         super().__init__(data_path, is_train, test_scene, cv2_output, **kwargs)
             

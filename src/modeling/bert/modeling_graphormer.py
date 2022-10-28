@@ -38,6 +38,7 @@ class BertSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.max_position_embeddings = config.max_position_embeddings
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -64,7 +65,7 @@ class BertSelfAttention(nn.Module):
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-        attention_scores = attention_scores + attention_mask
+        attention_scores[:,:,:,:self.max_position_embeddings] += attention_mask
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
@@ -206,7 +207,6 @@ class EncoderBlock(BertPreTrainedModel):
         self.embeddings = BertEmbeddings(config)
         self.encoder = GraphormerEncoder(config)
         self.pooler = BertPooler(config)
-        config.max_position_embeddings = 775
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.img_dim = config.img_feature_dim
 
@@ -234,7 +234,7 @@ class EncoderBlock(BertPreTrainedModel):
             position_ids=None, head_mask=None):
 
         batch_size = len(img_feats)
-        seq_length = len(img_feats[0])
+        seq_length = self.config.max_position_embeddings
         input_ids = torch.zeros([batch_size, seq_length],dtype=torch.long).cuda()
 
         if position_ids is None:
@@ -270,10 +270,10 @@ class EncoderBlock(BertPreTrainedModel):
             head_mask = [None] * self.config.num_hidden_layers
 
         # Project input token features to have spcified hidden size
-        img_embedding_output = self.img_embedding(img_feats)
-
+        embeddings = self.img_embedding(img_feats)
         # We empirically observe that adding an additional learnable position embedding leads to more stable training
-        embeddings = position_embeddings + img_embedding_output
+        # embeddings += position_embeddings
+        embeddings[:, :self.config.max_position_embeddings] += position_embeddings
 
         if self.use_img_layernorm:
             embeddings = self.LayerNorm(embeddings)

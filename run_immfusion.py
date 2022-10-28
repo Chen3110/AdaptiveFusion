@@ -480,7 +480,7 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
 
             # measure errors
             error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices, has_smpl)
-            error_joints = mean_per_joint_position_error(pred_3d_joints, gt_3d_joints,  has_3d_joints)
+            error_joints = mean_per_joint_position_error(pred_3d_joints, gt_3d_joints, has_3d_joints)
             error_joints_pa = reconstruction_error(pred_3d_joints.cpu().numpy(), gt_3d_joints[:,:,:3].cpu().numpy(), reduction=None)
 
             per_joint_err.append(torch.norm((pred_3d_joints - gt_3d_joints), dim=-1))
@@ -919,7 +919,7 @@ def parse_args():
     #########################################################
     # Data related arguments
     #########################################################
-    parser.add_argument("--data_path", default='/home/nesc525/drivers/6/dataset', type=str, required=False,
+    parser.add_argument("--data_path", default='/home/nesc525/drivers/0/dataset', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
     parser.add_argument("--train_yaml", default='Tax-H36m-coco40k-Muco-UP-Mpii/train.yaml', type=str, required=False,
                         help="Yaml file with all data for training.")
@@ -1012,7 +1012,7 @@ def parse_args():
     parser.add_argument('--mask_ratio', type=float, default=0.3)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
     parser.add_argument('--points_w_image_feat', action="store_true")
-    parser.add_argument('--wo_IGM', action="store_true")
+    parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--images_only', action="store_true")
     parser.add_argument('--points_only', action="store_true")
     parser.add_argument('--cat_global_feat', action="store_true")
@@ -1020,6 +1020,7 @@ def parse_args():
     parser.add_argument('--only_cluster_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
+    parser.add_argument('--max_position_embeddings', type=int, default=800)
 
     args = parser.parse_args()
     return args

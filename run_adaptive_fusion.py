@@ -34,7 +34,7 @@ from src.utils.miscellaneous import mkdir, set_seed
 from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.renderer import Renderer
 from src.utils.metric_pampjpe import reconstruction_error
-import src.datasets.dataset as Datasets
+import src.datasets.fusion_dataset as Datasets
 from src.utils.loss import LossManager
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
@@ -86,23 +86,18 @@ def adjust_learning_rate(optimizer, epoch, args):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-def mean_per_joint_position_error(pred, gt, has_3d_joints):
+def mean_per_joint_position_error(pred, gt):
     """ 
     Compute mPJPE
     """
-    gt = gt[has_3d_joints == 1]
-    pred = pred[has_3d_joints == 1]
-
     with torch.no_grad():
         error = torch.sqrt( ((pred - gt) ** 2).sum(dim=-1)).mean(dim=-1).cpu().numpy()
         return error
 
-def mean_per_vertex_error(pred, gt, has_smpl):
+def mean_per_vertex_error(pred, gt):
     """
     Compute mPVE
     """
-    pred = pred[has_smpl == 1]
-    gt = gt[has_smpl == 1]
     with torch.no_grad():
         error = torch.sqrt( ((pred - gt) ** 2).sum(dim=-1)).mean(dim=-1).cpu().numpy()
         return error
@@ -224,7 +219,7 @@ def show_att_weight(vertices_sub2, joints_3d, attention, seed_points, joint_id, 
 
     return res
 
-def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sampler, renderer, start_epoch):
+def run(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sampler, start_epoch):
     smpl.eval()
     max_iter = len(train_dataloader)
     iters_per_epoch = max_iter // args.num_train_epochs
@@ -232,7 +227,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
     if iters_per_epoch < 1000:
         args.logging_steps = 500
 
-    optimizer = torch.optim.Adam(params=list(Graphormer_model.parameters()),
+    optimizer = torch.optim.Adam(params=list(fusiuon_model.parameters()),
                                            lr=args.lr,
                                            betas=(0.9, 0.999),
                                            weight_decay=0)
@@ -242,8 +237,8 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
     criterion_vertices = torch.nn.L1Loss().cuda(args.device)
 
     if args.distributed:
-        Graphormer_model = torch.nn.parallel.DistributedDataParallel(
-            Graphormer_model, device_ids=[args.local_rank], 
+        fusiuon_model = torch.nn.parallel.DistributedDataParallel(
+            fusiuon_model, device_ids=[args.local_rank], 
             output_device=args.local_rank,
             find_unused_parameters=True,
         )
@@ -259,7 +254,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
 
     start_training_time = time.time()
     end = time.time()
-    Graphormer_model.train()
+    fusiuon_model.train()
     batch_time = AverageMeter()
     data_time = AverageMeter()
     log_losses = AverageMeter()
@@ -270,7 +265,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
     for iteration, data_dict in enumerate(train_dataloader):
         # gc.collect()
         # torch.cuda.empty_cache()
-        Graphormer_model.train()
+        fusiuon_model.train()
         iteration += start_iter + 1
         epoch = iteration // iters_per_epoch
         adjust_learning_rate(optimizer, epoch, args)
@@ -280,7 +275,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
         gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
         gt_3d_pelvis = data_dict['root_pelvis'].cuda(args.device)[:,None,:]
         gt_3d_joints -= gt_3d_pelvis
-        batch_size = gt_3d_joints.size(0)
+        batch_size = gt_3d_joints.shape[0]
 
         gt_pose = data_dict['pose'].cuda(args.device)
         gt_betas = data_dict['betas'].cuda(args.device)
@@ -298,17 +293,17 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
         gt_vertices -= gt_3d_pelvis
         
         if 'radar' in args.resource:
-            data_dict['radar'].cuda(args.device)
+            data_dict['radar'] = data_dict['radar'].cuda(args.device)
             data_dict['radar'][:,:,:3] -= gt_3d_pelvis
         if 'master_image' in args.resource:
-            data_dict['master_image'].cuda(args.device)
+            data_dict['master_image'] = data_dict['master_image'].cuda(args.device)
         if 'sub_image' in args.resource:
-            data_dict['sub_image'].cuda(args.device)
+            data_dict['sub_image'] = data_dict['sub_image'].cuda(args.device)
         if 'master_depth' in args.resource:
-            data_dict['master_depth'].cuda(args.device)
+            data_dict['master_depth'] = data_dict['master_depth'].cuda(args.device)
             data_dict['master_depth'][:,:,:3] -= gt_3d_pelvis
         if 'sub_depth' in args.resource:
-            data_dict['sub_depth'].cuda(args.device)
+            data_dict['sub_depth'] = data_dict['sub_depth'].cuda(args.device)
             data_dict['sub_depth'][:,:,:3] -= gt_3d_pelvis
 
         # prepare masks for mask vertex/joint modeling
@@ -317,7 +312,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
         meta_masks = torch.cat([joint_mask_, vert_mask_], dim=1)
 
         # forward-pass
-        pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = Graphormer_model(args, data_dict, smpl, mesh_sampler, meta_masks=meta_masks, is_train=True)
+        pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = fusiuon_model(args, data_dict, smpl, mesh_sampler, meta_masks=meta_masks, is_train=True)
 
         # compute 3d joint loss  (where the joints are directly output from transformer)
         loss_3d_joints = keypoint_3d_loss(criterion_keypoints, pred_3d_joints, gt_3d_joints, args.device)
@@ -377,13 +372,10 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
         if iteration % iters_per_epoch == 0:
             loss_manager.calculate_epoch_loss(os.path.join(args.output_dir, 'loss/train'), epoch)
             val_mPVE, val_mPJPE, val_PAmPJPE, val_count = run_validate(args, val_dataloader, 
-                                                Graphormer_model, 
-                                                criterion_keypoints, 
-                                                criterion_vertices, 
+                                                fusiuon_model, 
                                                 epoch, 
                                                 smpl,
                                                 mesh_sampler,
-                                                renderer,
                                                 loss_manager)
             
             aml_run.log(name='mPVE', value=float(1000*val_mPVE))
@@ -395,7 +387,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
             )
 
             if val_PAmPJPE<log_eval_metrics.PAmPJPE or epoch%10==0:
-                save_checkpoint(Graphormer_model, args, epoch, iteration)
+                save_checkpoint(fusiuon_model, args, epoch, iteration)
                 log_eval_metrics.update(val_mPVE, val_mPJPE, val_PAmPJPE, epoch)
         
     total_training_time = time.time() - start_training_time
@@ -403,7 +395,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
     logger.info('Total training time: {} ({:.4f} s / iter)'.format(
         total_time_str, total_training_time / max_iter)
     )
-    save_checkpoint(Graphormer_model, args, epoch, iteration)
+    save_checkpoint(fusiuon_model, args, epoch, iteration)
 
     logger.info(
         ' Best Results:'
@@ -411,28 +403,18 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
     )
 
 
-def run_eval_general(args, val_dataloader, Graphormer_model, smpl, mesh_sampler, renderer):
+def run_eval_general(args, val_dataloader, fusion_model, smpl, mesh_sampler):
     smpl.eval()
-    criterion_keypoints = torch.nn.MSELoss(reduction='none').cuda(args.device)
-    criterion_vertices = torch.nn.L1Loss().cuda(args.device)
-
     epoch = 0
     if args.distributed:
-        Graphormer_model = torch.nn.parallel.DistributedDataParallel(
-            Graphormer_model, device_ids=[args.local_rank], 
+        fusion_model = torch.nn.parallel.DistributedDataParallel(
+            fusion_model, device_ids=[args.local_rank], 
             output_device=args.local_rank,
             find_unused_parameters=True,
         )
-    Graphormer_model.eval()
+    fusion_model.eval()
 
-    val_mPVE, val_mPJPE, val_PAmPJPE, val_count = run_validate(args, val_dataloader, 
-                                    Graphormer_model, 
-                                    criterion_keypoints, 
-                                    criterion_vertices, 
-                                    epoch, 
-                                    smpl,
-                                    mesh_sampler,
-                                    renderer)
+    val_mPVE, val_mPJPE, val_PAmPJPE, val_count = run_validate(args, val_dataloader, fusion_model, epoch, smpl, mesh_sampler)
 
     aml_run.log(name='mPVE', value=float(1000*val_mPVE))
     aml_run.log(name='mPJPE', value=float(1000*val_mPJPE))
@@ -467,7 +449,7 @@ def result_generator(pcls, pred_vertices, gt_vertices, face, pred_verts_sub2, pr
         O3DStreamPlot.pause = pause_at_start
         yield res
 
-def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertices, epoch, smpl, mesh_sampler, renderer=None, loss_manager=None):
+def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss_manager=None):
     batch_time = AverageMeter()
     mPVE = AverageMeter()
     mPJPE = AverageMeter()
@@ -482,24 +464,18 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
             os.makedirs(snapshot_path)
         plot = EvaluateStreamPlot(save_path=snapshot_path)
     # switch to evaluate mode
-    Graphormer_model.eval()
+    fusion_model.eval()
     smpl.eval()
     batch = 0
     with torch.no_grad():
-        for i, (pcls, images, annotations) in enumerate(val_loader):
-            batch_size = images.size(0)
+        for i, data_dict in enumerate(val_loader):
             # compute output
-            images = images.cuda(args.device)
-            pcls = pcls.cuda(args.device)
-            gt_3d_joints = annotations['joints_3d'].cuda(args.device)
-            gt_3d_pelvis = annotations['root_pelvis'].cuda(args.device)[:,None,:]
-            # gt_3d_joints = gt_3d_joints[:,cfg.J24_TO_J14,:] 
-            gt_3d_joints[:,:,:3] = gt_3d_joints[:,:,:3] - gt_3d_pelvis
-            has_3d_joints = annotations['has_3d_joints'].cuda(args.device)
+            gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
+            gt_3d_pelvis = data_dict['root_pelvis'].cuda(args.device)[:,None,:]
+            gt_3d_joints -= gt_3d_pelvis
 
-            gt_pose = annotations['pose'].cuda(args.device)
-            gt_betas = annotations['betas'].cuda(args.device)
-            has_smpl = annotations['has_smpl'].cuda(args.device)
+            gt_pose = data_dict['pose'].cuda(args.device)
+            gt_betas = data_dict['betas'].cuda(args.device)
 
             # generate simplified mesh
             mesh_res = smpl(gt_pose, gt_betas)
@@ -508,28 +484,41 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
             gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices_sub, n1=1, n2=2)
 
             # normalize gt based on smpl pelvis 
-            gt_vertices_sub2 = gt_vertices_sub2 - gt_3d_pelvis
-            gt_vertices_sub = gt_vertices_sub - gt_3d_pelvis 
-            gt_vertices = gt_vertices - gt_3d_pelvis
-            pcls[:,:,:3] -= gt_3d_pelvis
+            gt_vertices_sub2 -= gt_3d_pelvis
+            gt_vertices_sub -= gt_3d_pelvis
+            gt_vertices -= gt_3d_pelvis
+                    
+            if 'radar' in args.resource:
+                data_dict['radar'] = data_dict['radar'].cuda(args.device)
+                data_dict['radar'][:,:,:3] -= gt_3d_pelvis
+            if 'master_image' in args.resource:
+                data_dict['master_image'] = data_dict['master_image'].cuda(args.device)
+            if 'sub_image' in args.resource:
+                data_dict['sub_image'] = data_dict['sub_image'].cuda(args.device)
+            if 'master_depth' in args.resource:
+                data_dict['master_depth'] = data_dict['master_depth'].cuda(args.device)
+                data_dict['master_depth'][:,:,:3] -= gt_3d_pelvis
+            if 'sub_depth' in args.resource:
+                data_dict['sub_depth'] = data_dict['sub_depth'].cuda(args.device)
+                data_dict['sub_depth'][:,:,:3] -= gt_3d_pelvis
 
             # forward-pass
-            pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = Graphormer_model(args, images, smpl, mesh_sampler, pcls=pcls)
+            pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
 
             # measure errors
-            error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices, has_smpl)
-            error_joints = mean_per_joint_position_error(pred_3d_joints, gt_3d_joints,  has_3d_joints)
+            error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices)
+            error_joints = mean_per_joint_position_error(pred_3d_joints, gt_3d_joints)
             error_joints_pa = reconstruction_error(pred_3d_joints.cpu().numpy(), gt_3d_joints[:,:,:3].cpu().numpy(), reduction=None)
 
             per_joint_err.append(torch.norm((pred_3d_joints - gt_3d_joints), dim=-1))
             per_vertex_err.append(torch.norm((pred_vertices - gt_vertices), dim=-1))
 
             if len(error_vertices)>0:
-                mPVE.update(np.mean(error_vertices), int(torch.sum(has_smpl)) )
+                mPVE.update(np.mean(error_vertices))
             if len(error_joints)>0:
-                mPJPE.update(np.mean(error_joints), int(torch.sum(has_3d_joints)) )
+                mPJPE.update(np.mean(error_joints))
             if len(error_joints_pa)>0:
-                PAmPJPE.update(np.mean(error_joints_pa), int(torch.sum(has_3d_joints)) )
+                PAmPJPE.update(np.mean(error_joints_pa))
 
             if loss_manager is not None:
                 loss_manager.update_loss("mPVE", np.mean(error_vertices))
@@ -540,8 +529,8 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
             if args.visual:
                 att = pred_dict.get('attention', [0])[-1]
                 seed_points = pred_dict.get('seed_points', None)
-                gen = result_generator(pcls[:,:,:3], pred_vertices, gt_vertices, smpl.f, pred_vertices_sub2, pred_3d_joints, 
-                                    att, seed_points, args.joint_id, annotations['orig_img'], gt_3d_pelvis, args.show_att, pause_at_start=True)
+                gen = result_generator(data_dict['radar'][:,:,:3], pred_vertices, gt_vertices, smpl.f, pred_vertices_sub2, pred_3d_joints, 
+                                    att, seed_points, args.joint_id, data_dict['orig_img'], gt_3d_pelvis, args.show_att, pause_at_start=True)
                 batch += 1
                 if batch > args.max_num_batch:
                     return 0, 0, 0, 0
@@ -642,9 +631,6 @@ def main(args):
     smpl = SMPLXModel(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, device=args.device).to(args.device)
     mesh_sampler = Mesh()
 
-    # Renderer for visualization
-    renderer = Renderer(faces=smpl.f.cpu().numpy())
-
     # Load model
     trans_encoder = []
 
@@ -673,6 +659,7 @@ def main(args):
             config.output_feature_dim = output_feat_dim[i]
             args.hidden_size = hidden_feat_dim[i]
             args.intermediate_size = int(args.hidden_size*args.interm_size_scale)
+            config.max_position_embeddings = args.max_position_embeddings
 
             if which_blk_graph[i]==1:
                 config.graph_conv = True
@@ -772,11 +759,11 @@ def main(args):
                                             scale_factor=args.img_scale_factor)
         val_dataloader = make_data_loader(args, dataset_eval, args.distributed, is_train=False, 
                                             scale_factor=args.img_scale_factor)
-        run(args, train_dataloader, val_dataloader, _model, smpl, mesh_sampler, renderer, start_epoch)
+        run(args, train_dataloader, val_dataloader, _model, smpl, mesh_sampler, start_epoch)
         
     else:
         val_dataloader = make_data_loader(args, dataset, args.distributed, is_train=False, scale_factor=args.img_scale_factor)
-        run_eval_general(args, val_dataloader, _model, smpl, mesh_sampler, renderer)
+        run_eval_general(args, val_dataloader, _model, smpl, mesh_sampler)
 
 
 def parse_args():
@@ -784,7 +771,7 @@ def parse_args():
     #########################################################
     # Data related arguments
     #########################################################
-    parser.add_argument("--data_path", default='/home/nesc525/drivers/0/dataset', type=str, required=False,
+    parser.add_argument("--data_path", default='/home/nesc525/drivers/6/dataset', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
     parser.add_argument("--num_workers", default=30, type=int, 
                         help="Workers in dataloader.")
@@ -799,7 +786,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='ImmDataset')
     parser.add_argument('--num_points', type=int, default=1024)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
-    parser.add_argument('--resource', type=str, default='radar,master_image,master_depth,sub_image', help='input data')
+    parser.add_argument('--resource', type=str, default='radar,master_image,master_depth,sub_image,sub_depth', help='input data')
     parser.add_argument('--trans_coor_to_cam', action="store_true")
     #########################################################
     # Loading/saving checkpoints
@@ -882,6 +869,7 @@ def parse_args():
     parser.add_argument('--only_cluster_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
+    parser.add_argument('--max_position_embeddings', type=int, default=677)
 
     args = parser.parse_args()
     return args

@@ -4,18 +4,18 @@ Licensed under the MIT license.
 
 """
 
-import copy
-import torch
+import random
 import torch
 import numpy as np
 from src.datasets.utils import gen_mask_indices
-import src.modeling.data.config as cfg
 from src.modeling.bert.transformer import Transformer
 
 
-class FusionGraphormer():
+class FusionGraphormer(torch.nn.Module):
     def __init__(self, backbone, trans_encoder):
-        self.backbone = backbone
+        super(FusionGraphormer, self).__init__()
+        self.point_backbone = backbone['point']
+        self.image_backbone = backbone['image']
         self.trans_encoder = trans_encoder
         self.upsampling = torch.nn.Linear(655, 2619)
         self.upsampling2 = torch.nn.Linear(2619, 10475)
@@ -31,24 +31,24 @@ class FusionGraphormer():
 
     def process_image(self, images):
         # extract grid features and global image features using a CNN backbone
-        image_feat, grid_feat = self.backbone['image'](images)
+        image_feat, grid_feat = self.image_backbone(images)
         # process grid features
         grid_feat = torch.flatten(grid_feat, start_dim=2)
         grid_feat = grid_feat.transpose(1,2)
         grid_feat = self.grid_feat_dim(grid_feat)
-        return image_feat.view(images.size[0],1,2048), grid_feat
+        return image_feat.view(images.shape[0],1,2048), grid_feat
 
     def process_point(self, points):
         # extract cluster features and global point features using a PointNet backbone
-        xyz, cluster_feat = self.backbone['point'](xyz=points[:,:,:3].contiguous(), features=points[:,:,3:].transpose(1,2).contiguous())
+        xyz, cluster_feat = self.point_backbone(xyz=points[:,:,:3].contiguous(), features=points[:,:,3:].transpose(1,2).contiguous())
         xyz_embedding = self.point_embedding(xyz)
         point_feat = self.point_feat_num_dim(cluster_feat).squeeze()
         cluster_feat = torch.cat([xyz, cluster_feat.transpose(1,2).contiguous()], dim=2)
         cluster_feat = xyz_embedding + cluster_feat
-        return point_feat.view(points.size[0],1,2048), cluster_feat
+        return point_feat.view(points.shape[0],1,2048), cluster_feat
     
     def forward(self, args, data_dict, smpl, mesh_sampler, meta_masks=None, is_train=False):
-        batch_size = args.per_gpu_train_batch_size if is_train else args.per_gpu_eval_batch_size
+        batch_size = data_dict['joints_3d'].shape[0]
         # Generate T-pose template mesh
         template_pose = torch.zeros((1,69))
         template_pose[:,0] = 3.1416 # Rectify "upside down" reference mesh in global coord
@@ -87,41 +87,47 @@ class FusionGraphormer():
             # modality mask
             modality_indices = gen_mask_indices(max_mask_num=len(args.resource), mask_ratio=1.)
             for i in modality_indices:
-                data_dict[args.resource[i]] = []
+                data_dict[args.resource[i]] = torch.Tensor([[]])
         
         global_feats = []
         local_feats = []
         
-        if not data_dict['radar']:
+        if data_dict['radar'].shape[1]:
             radar_gloabl_feat, radar_local_feat = self.process_point(data_dict['radar'])
             global_feats.append(radar_gloabl_feat)
             local_feats.append(radar_local_feat)
             
-        if not data_dict['master_image']:
+        if data_dict['master_image'].shape[1]:
             mas_img_gloabl_feat, mas_img_local_feat = self.process_image(data_dict['master_image'])
             global_feats.append(mas_img_gloabl_feat)
             local_feats.append(mas_img_local_feat)
             
-        if not data_dict['master_depth']:
+        if data_dict['master_depth'].shape[1]:
             mas_depth_gloabl_feat, mas_depth_local_feat = self.process_point(data_dict['master_depth'])
             global_feats.append(mas_depth_gloabl_feat)
             local_feats.append(mas_depth_local_feat)
             
-        if not data_dict['sub_image']:
+        if data_dict['sub_image'].shape[1]:
             sub_img_gloabl_feat, sub_img_local_feat = self.process_image(data_dict['sub_image'])
             global_feats.append(sub_img_gloabl_feat)
             local_feats.append(sub_img_local_feat)
             
-        if not data_dict['sub_depth']:
+        if data_dict['sub_depth'].shape[1]:
             sub_depth_gloabl_feat, sub_depth_local_feat = self.process_point(data_dict['sub_depth'])
             global_feats.append(sub_depth_gloabl_feat)
             local_feats.append(sub_depth_local_feat)
-        
+            
+        if is_train:
+            # shuffle global and local features
+            feat_zip = list(zip(global_feats, local_feats))
+            random.shuffle(feat_zip)
+            global_feats, local_feats = zip(*feat_zip)
         # concatinate global and local features
         global_feats = torch.cat(global_feats, dim=1)
         local_feats = torch.cat(local_feats, dim=1)
         # integrate image and point global features
-        fusion_feat = self.GIM(global_feats).expand(-1,ref_vertices.shape[-2],-1)
+        fusion_feat = self.GIM(global_feats)
+        fusion_feat = torch.sum(fusion_feat, dim=1, keepdim=True).expand(-1,ref_vertices.shape[-2], -1)
         # concatinate image/point feat and 3d mesh template
         features = torch.cat([ref_vertices, fusion_feat], dim=2)
         # prepare input tokens including joint/vertex queries and local features

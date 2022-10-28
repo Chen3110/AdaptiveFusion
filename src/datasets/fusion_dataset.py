@@ -56,15 +56,15 @@ class FusionDataset():
         new_orient = cv2.Rodrigues(orient_mat)[0]
         return new_trans, new_orient
     
-    def process_image(self, image, joints):
-        # img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        # # crop person area using joints
-        # img = crop_image(joints, img, square=True)
-        # img = cv2.resize(img, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
-        # img = np.transpose(img.astype('float32'), (2,0,1))/255.0
-        img = image.astype('float32')/255.0
-        img = torch.from_numpy(img).float()
-        transformed_img = self.normalize_img(img)
+    def process_image(self, image, joints=None, need_crop=False):
+        if need_crop:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # crop person area using joints
+            image = crop_image(joints, image, square=True)
+            image = cv2.resize(image, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
+        image = np.transpose(image.astype('float32'), (2,0,1))/255.0
+        image = torch.from_numpy(image).float()
+        transformed_img = self.normalize_img(image)
         return transformed_img
     
     def process_pcl(self, pcl, joints, trans_mat, padding_points=1024, mask_ratio=0.):
@@ -73,8 +73,9 @@ class FusionDataset():
         if not pcl.shape[0]:
             pcl = np.zeros([1, 6], dtype=np.float32)
         if mask_ratio:
-            mask_indices = gen_mask_indices(pcl.size[0], mask_ratio)
-            pcl = np.delete(pcl, mask_indices)
+            # mask x% of points
+            mask_indices = gen_mask_indices(pcl.shape[0], mask_ratio, random_num=False)
+            pcl = np.delete(pcl, mask_indices, axis=0)
         if trans_mat is not None:
             trans_pcl = (pcl[:,:3] - trans_mat['t']) @ trans_mat['R']
             pcl = np.hstack((trans_pcl, pcl[:,3:]))
@@ -102,17 +103,17 @@ class FusionDataset():
         joints = mesh['joints'][:22]
 
         # process image
-        mas_img = []
+        mas_img = np.array([])
         if 'master_image' in self.args.resource:
             trans_mat_mas = seq_loader.calib['kinect_master']
             joints_mas = (joints - trans_mat_mas['t']) @ trans_mat_mas['R']
             mas_img = self.process_image(frame['master_image'], joints_mas)
 
-        sub_img = []
+        sub_img = np.array([])
         if 'sub_image' in self.args.resource:
             trans_mat_sub = seq_loader.calib['kinect_sub']
             joints_sub = (joints - trans_mat_sub['t']) @ trans_mat_sub['R']
-            sub_img = self.process_image(frame['master_image'], joints_sub)
+            sub_img = self.process_image(frame['sub_image'], joints_sub)
         
         # transform mesh param and joints to the kinect coordinate if need
         trans_joints = joints
@@ -135,20 +136,20 @@ class FusionDataset():
         joint_center = ((trans_joints.max(axis=0) + trans_joints.min(axis=0))/2)[:3]
         
         # process radar pcl
-        radar_pcl = []
+        radar_pcl = np.array([])
         if 'radar' in self.args.resource:
             radar_pcl = frame['radar']
             radar_pcl[:,3:] /= np.array([5e-38, 5., 150.])
             radar_pcl = self.process_pcl(radar_pcl, joints, trans_mat_to_cam)
             
         # process depth pcl
-        mask_ratio = 0.9 if self.args.train else 0.
-        mas_depth = []
+        mask_ratio = 0.99 if self.args.train else 0.
+        mas_depth = np.array([])
         if 'master_depth' in self.args.resource:
             mas_depth = frame['master_depth']
             mas_depth = self.process_pcl(mas_depth, joints, trans_mat_to_cam, padding_points=4096, mask_ratio=mask_ratio)
         
-        sub_depth = []
+        sub_depth = np.array([])
         if 'sub_depth' in self.args.resource:
             sub_depth = frame['sub_depth']
             sub_depth = self.process_pcl(sub_depth, joints, trans_mat_to_cam, padding_points=4096, mask_ratio=mask_ratio)
