@@ -292,19 +292,8 @@ def run(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sample
         gt_vertices_sub -= gt_3d_pelvis
         gt_vertices -= gt_3d_pelvis
         
-        if 'radar' in args.resource:
-            data_dict['radar'] = data_dict['radar'].cuda(args.device)
-            data_dict['radar'][:,:,:3] -= gt_3d_pelvis
-        if 'master_image' in args.resource:
-            data_dict['master_image'] = data_dict['master_image'].cuda(args.device)
-        if 'sub_image' in args.resource:
-            data_dict['sub_image'] = data_dict['sub_image'].cuda(args.device)
-        if 'master_depth' in args.resource:
-            data_dict['master_depth'] = data_dict['master_depth'].cuda(args.device)
-            data_dict['master_depth'][:,:,:3] -= gt_3d_pelvis
-        if 'sub_depth' in args.resource:
-            data_dict['sub_depth'] = data_dict['sub_depth'].cuda(args.device)
-            data_dict['sub_depth'][:,:,:3] -= gt_3d_pelvis
+        for m in args.resource:
+            data_dict[m] = data_dict[m].cuda(args.device)
 
         # prepare masks for mask vertex/joint modeling
         joint_mask_ = joint_mask.expand(-1,-1,2051)
@@ -488,17 +477,17 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             gt_vertices_sub -= gt_3d_pelvis
             gt_vertices -= gt_3d_pelvis
                     
-            if 'radar' in args.resource:
+            if 'radar' in args.resource and data_dict['radar'].shape[1]:
                 data_dict['radar'] = data_dict['radar'].cuda(args.device)
                 data_dict['radar'][:,:,:3] -= gt_3d_pelvis
             if 'master_image' in args.resource:
                 data_dict['master_image'] = data_dict['master_image'].cuda(args.device)
             if 'sub_image' in args.resource:
                 data_dict['sub_image'] = data_dict['sub_image'].cuda(args.device)
-            if 'master_depth' in args.resource:
+            if 'master_depth' in args.resource and data_dict['master_depth'].shape[1]:
                 data_dict['master_depth'] = data_dict['master_depth'].cuda(args.device)
                 data_dict['master_depth'][:,:,:3] -= gt_3d_pelvis
-            if 'sub_depth' in args.resource:
+            if 'sub_depth' in args.resource and data_dict['sub_depth'].shape[1]:
                 data_dict['sub_depth'] = data_dict['sub_depth'].cuda(args.device)
                 data_dict['sub_depth'][:,:,:3] -= gt_3d_pelvis
 
@@ -624,7 +613,7 @@ def main(args):
     logger = setup_logger("Graphormer", args.output_dir, get_rank())
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
-    args.resource = ['radar','master_image','master_depth','sub_image','sub_depth',] if args.train else args.resource.split(',')
+    args.resource = ['radar','master_image','master_depth','sub_image','sub_depth',] if args.train else args.resource.replace(' ','').split(',')
     if not args.resource:
         raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
@@ -672,7 +661,7 @@ def main(args):
             # update model structure if specified in arguments
             update_params = ['num_hidden_layers', 'hidden_size', 'num_attention_heads', 'intermediate_size']
 
-            for idx, param in enumerate(update_params):
+            for param in update_params:
                 arg_param = getattr(args, param)
                 config_param = getattr(config, param)
                 if arg_param > 0 and arg_param != config_param:
@@ -712,13 +701,13 @@ def main(args):
         backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
         
-        pcl_backbone = PointnetSAModule(npoint=32, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
+        pcl_backbone = PointnetSAModule(npoint=args.num_cluster_feat, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
         
         backbone = dict(image=img_backbone, point=pcl_backbone)
 
         # build end-to-end Graphormer network (backbone + multi-layer graphormer encoder)
         Model = getattr(Models, args.model)
-        _model = Model(backbone, trans_encoder)
+        _model = Model(backbone, trans_encoder, args.num_cluster_feat)
 
         start_epoch = 0
         if args.resume_checkpoint!=None and args.resume_checkpoint!='None':
@@ -842,6 +831,7 @@ def parse_args():
                         help="which encoder block to have graph conv. Encoder1, Encoder2, Encoder3. Default: only Encoder3 has graph conv") 
     parser.add_argument("--mesh_type", default='body', type=str, help="body or hand") 
     parser.add_argument("--interm_size_scale", default=2, type=int)
+    parser.add_argument("--num_cluster_feat", default=32, type=int)
     #########################################################
     # Others
     #########################################################
@@ -859,7 +849,8 @@ def parse_args():
     parser.add_argument('--max_num_batch', type=int, default=10000)
     parser.add_argument('--save_snapshot', action="store_true")
     parser.add_argument('--output_dim', type=int, default=3)
-    parser.add_argument('--mask_ratio', type=float, default=0.3)
+    parser.add_argument('--image_mask_ratio', type=float, default=0.3)
+    parser.add_argument('--point_mask_ratio', type=float, default=0.3)
     parser.add_argument('--points_w_image_feat', action="store_true")
     parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--images_only', action="store_true")

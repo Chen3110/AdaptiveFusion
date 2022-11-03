@@ -7,12 +7,12 @@ Licensed under the MIT license.
 import random
 import torch
 import numpy as np
-from src.datasets.utils import gen_mask_indices
+from src.datasets.utils import gen_random_indices
 from src.modeling.bert.transformer import Transformer
 
 
 class FusionGraphormer(torch.nn.Module):
-    def __init__(self, backbone, trans_encoder):
+    def __init__(self, backbone, trans_encoder, num_cluster_feat):
         super(FusionGraphormer, self).__init__()
         self.point_backbone = backbone['point']
         self.image_backbone = backbone['image']
@@ -22,8 +22,7 @@ class FusionGraphormer(torch.nn.Module):
         self.grid_feat_dim = torch.nn.Linear(1024, 2051)
         self.image_feat_dim = torch.nn.Linear(2048, 1024)
         
-        self.point_feat_num_dim = torch.nn.Linear(32, 1)
-        # self.point_feat_num_dim = torch.nn.Linear(49, 1)
+        self.point_feat_num_dim = torch.nn.Linear(num_cluster_feat, 1)
         self.point_feat_dim = torch.nn.Linear(2048, 1024)
         self.point_embedding = torch.nn.Linear(3, 2051)
         
@@ -50,10 +49,10 @@ class FusionGraphormer(torch.nn.Module):
     def forward(self, args, data_dict, smpl, mesh_sampler, meta_masks=None, is_train=False):
         batch_size = data_dict['joints_3d'].shape[0]
         # Generate T-pose template mesh
-        template_pose = torch.zeros((1,69))
-        template_pose[:,0] = 3.1416 # Rectify "upside down" reference mesh in global coord
+        template_pose = torch.zeros((1, 69))
+        template_pose[:, 0] = 3.1416 # Rectify "upside down" reference mesh in global coord
         template_pose = template_pose.cuda(args.device)
-        template_betas = torch.zeros((1,16)).cuda(args.device)
+        template_betas = torch.zeros((1, 16)).cuda(args.device)
         template_res = smpl(template_pose, template_betas)
         template_vertices = template_res['verts']
 
@@ -63,7 +62,7 @@ class FusionGraphormer(torch.nn.Module):
 
         # template mesh-to-joint regression 
         template_3d_joints = template_res['joints'][:, :22]
-        template_pelvis = template_3d_joints[:,0,:]
+        template_pelvis = template_3d_joints[:, 0, :]
         num_joints = template_3d_joints.shape[1]
 
         # normalize
@@ -74,20 +73,23 @@ class FusionGraphormer(torch.nn.Module):
         ref_vertices = torch.cat([template_3d_joints, template_vertices_sub2],dim=1)
         ref_vertices = ref_vertices.expand(batch_size, -1, -1)
 
-        if is_train:
-            # image mask
-            image_mask = np.ones((batch_size, 1, 1, 1))
-            image_indices = gen_mask_indices(batch_size, args.mask_ratio)
-            image_mask[image_indices] = 0.0
-            image_mask = torch.from_numpy(image_mask).float().to(args.device)
-            image_mask = image_mask.expand(-1, 3, 224, 224)
-            data_dict['master_image'] *= image_mask
-            data_dict['sub_image'] *= image_mask
-            
+        if is_train:       
             # modality mask
-            modality_indices = gen_mask_indices(max_mask_num=len(args.resource), mask_ratio=1.)
+            modality_indices = gen_random_indices(max_random_num=len(args.resource), random_ratio=1.)
             for i in modality_indices:
                 data_dict[args.resource[i]] = torch.Tensor([[]])
+            # conduct image mask if image and point modalities are both active
+            if {1, 3} & set(modality_indices) and {0, 2, 4} & set(modality_indices):
+                image_mask = np.ones((batch_size, 1, 1, 1))
+                # generate mask indices of batch
+                image_indices = gen_random_indices(batch_size, args.image_mask_ratio)
+                image_mask[image_indices] = 0.0
+                image_mask = torch.from_numpy(image_mask).float().to(args.device)
+                image_mask = image_mask.expand(-1, 3, 224, 224)
+                if 1 in modality_indices:
+                    data_dict['master_image'] *= image_mask
+                if 3 in modality_indices:
+                    data_dict['sub_image'] *= image_mask
         
         global_feats = []
         local_feats = []
@@ -125,10 +127,10 @@ class FusionGraphormer(torch.nn.Module):
         # concatinate global and local features
         global_feats = torch.cat(global_feats, dim=1)
         local_feats = torch.cat(local_feats, dim=1)
-        # integrate image and point global features
+        # integrate global features
         fusion_feat = self.GIM(global_feats)
         fusion_feat = torch.sum(fusion_feat, dim=1, keepdim=True).expand(-1,ref_vertices.shape[-2], -1)
-        # concatinate image/point feat and 3d mesh template
+        # concatinate global features and 3d mesh template
         features = torch.cat([ref_vertices, fusion_feat], dim=2)
         # prepare input tokens including joint/vertex queries and local features
         features = torch.cat([features, local_feats], dim=1)

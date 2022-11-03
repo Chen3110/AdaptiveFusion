@@ -131,7 +131,8 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
         elif size[0] < size[1]:
             box_max[0] += diff
             box_min[0] -= diff
-        
+    box_max = np.where(box_max<image.shape[:2], box_max, image.shape[:2])
+    box_min = np.where(box_min>0, box_min, 0)        
     # crop image
     crop_img = image[box_min[0]:box_max[0], box_min[1]:box_max[1]]
 
@@ -203,9 +204,9 @@ def rodrigues_2_rot_mat(rvecs):
 
     return R.reshape(batch_size, -1)
 
-def gen_mask_indices(max_mask_num, mask_ratio, random_num=True):
+def gen_random_indices(max_random_num, random_ratio, random_num=True):
     pb = np.random.rand() if random_num else 1.
     # at most x% of images could be masked
-    mask_num = np.floor(pb * mask_ratio * max_mask_num)
-    mask_indices = np.random.choice(np.arange(max_mask_num),replace=False,size=int(mask_num))
-    return mask_indices
+    num_indices = np.floor(pb * random_ratio * max_random_num)
+    indices = np.random.choice(np.arange(max_random_num),replace=False,size=int(num_indices))
+    return np.sort(indices)

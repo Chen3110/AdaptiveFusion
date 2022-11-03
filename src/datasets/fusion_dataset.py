@@ -67,18 +67,20 @@ class FusionDataset():
         transformed_img = self.normalize_img(image)
         return transformed_img
     
-    def process_pcl(self, pcl, joints, trans_mat, padding_points=1024, mask_ratio=0.):
+    def process_pcl(self, pcl, joints, trans_mat, padding_points=1024, mask=False):
         # filter person pcl using joints
         pcl = filter_pcl(joints, pcl)
         if not pcl.shape[0]:
-            pcl = np.zeros([1, 6], dtype=np.float32)
-        if mask_ratio:
-            # mask x% of points
-            mask_indices = gen_mask_indices(pcl.shape[0], mask_ratio, random_num=False)
-            pcl = np.delete(pcl, mask_indices, axis=0)
+            return torch.zeros((padding_points, 6)).float()
+        if mask:
+            # mask points
+            indices = np.random.choice(pcl.shape[0], 100, replace=False)
+            pcl = pcl[indices]
         if trans_mat is not None:
             trans_pcl = (pcl[:,:3] - trans_mat['t']) @ trans_mat['R']
             pcl = np.hstack((trans_pcl, pcl[:,3:]))
+        # normalize pcl
+        pcl[:,:3] -= joints[0]
         # padding pcl
         pcl = pad_pcl(pcl, padding_points)
         pcl = torch.from_numpy(pcl).float()
@@ -87,7 +89,7 @@ class FusionDataset():
     def gen_mask(self, num_mask, mask_ratio):
         mask = np.ones((num_mask))
         if self.args.train:
-            indices = gen_mask_indices(num_mask, mask_ratio)
+            indices = gen_random_indices(num_mask, mask_ratio)
             mask[indices] = 0.0
         return torch.from_numpy(mask).float()
     
@@ -103,13 +105,13 @@ class FusionDataset():
         joints = mesh['joints'][:22]
 
         # process image
-        mas_img = np.array([])
+        mas_img = torch.Tensor([[]])
         if 'master_image' in self.args.resource:
             trans_mat_mas = seq_loader.calib['kinect_master']
             joints_mas = (joints - trans_mat_mas['t']) @ trans_mat_mas['R']
             mas_img = self.process_image(frame['master_image'], joints_mas)
 
-        sub_img = np.array([])
+        sub_img = torch.Tensor([[]])
         if 'sub_image' in self.args.resource:
             trans_mat_sub = seq_loader.calib['kinect_sub']
             joints_sub = (joints - trans_mat_sub['t']) @ trans_mat_sub['R']
@@ -136,23 +138,27 @@ class FusionDataset():
         joint_center = ((trans_joints.max(axis=0) + trans_joints.min(axis=0))/2)[:3]
         
         # process radar pcl
-        radar_pcl = np.array([])
+        radar_pcl = torch.Tensor([[]])
         if 'radar' in self.args.resource:
             radar_pcl = frame['radar']
             radar_pcl[:,3:] /= np.array([5e-38, 5., 150.])
             radar_pcl = self.process_pcl(radar_pcl, joints, trans_mat_to_cam)
             
         # process depth pcl
-        mask_ratio = 0.99 if self.args.train else 0.
-        mas_depth = np.array([])
+        if self.args.train:
+            random_value = np.random.rand()
+            mask = True if random_value >= 0.7 else False
+        else:
+            mask = False
+        mas_depth = torch.Tensor([[]])
         if 'master_depth' in self.args.resource:
             mas_depth = frame['master_depth']
-            mas_depth = self.process_pcl(mas_depth, joints, trans_mat_to_cam, padding_points=4096, mask_ratio=mask_ratio)
+            mas_depth = self.process_pcl(mas_depth, joints, trans_mat_to_cam, padding_points=4096, mask=mask)
         
-        sub_depth = np.array([])
+        sub_depth = torch.Tensor([[]])
         if 'sub_depth' in self.args.resource:
             sub_depth = frame['sub_depth']
-            sub_depth = self.process_pcl(sub_depth, joints, trans_mat_to_cam, padding_points=4096, mask_ratio=mask_ratio)
+            sub_depth = self.process_pcl(sub_depth, joints, trans_mat_to_cam, padding_points=4096, mask=mask)
             
         # masking tokens
         joint_mask = self.gen_mask(num_mask=22, mask_ratio=0.3).unsqueeze(-1)
