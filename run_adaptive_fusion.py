@@ -1,8 +1,3 @@
-"""
-Training and evaluation codes for 
-3D human body mesh reconstruction from multimodal data
-"""
-
 from __future__ import absolute_import, division, print_function
 import argparse
 import os
@@ -292,8 +287,10 @@ def run(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sample
         gt_vertices_sub -= gt_3d_pelvis
         gt_vertices -= gt_3d_pelvis
         
-        for m in args.resource:
+        for m in args.inputs:
             data_dict[m] = data_dict[m].cuda(args.device)
+        for k, v in data_dict['trans_mat'].items():
+            data_dict['trans_mat'][k] = v.cuda(args.device)
 
         # prepare masks for mask vertex/joint modeling
         joint_mask_ = joint_mask.expand(-1,-1,2051)
@@ -477,20 +474,11 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             gt_vertices_sub -= gt_3d_pelvis
             gt_vertices -= gt_3d_pelvis
                     
-            if 'radar' in args.resource and data_dict['radar'].shape[1]:
-                data_dict['radar'] = data_dict['radar'].cuda(args.device)
-                data_dict['radar'][:,:,:3] -= gt_3d_pelvis
-            if 'master_image' in args.resource:
-                data_dict['master_image'] = data_dict['master_image'].cuda(args.device)
-            if 'sub_image' in args.resource:
-                data_dict['sub_image'] = data_dict['sub_image'].cuda(args.device)
-            if 'master_depth' in args.resource and data_dict['master_depth'].shape[1]:
-                data_dict['master_depth'] = data_dict['master_depth'].cuda(args.device)
-                data_dict['master_depth'][:,:,:3] -= gt_3d_pelvis
-            if 'sub_depth' in args.resource and data_dict['sub_depth'].shape[1]:
-                data_dict['sub_depth'] = data_dict['sub_depth'].cuda(args.device)
-                data_dict['sub_depth'][:,:,:3] -= gt_3d_pelvis
-
+            for m in args.inputs:
+                data_dict[m] = data_dict[m].cuda(args.device)
+            for k, v in data_dict['trans_mat'].items():
+                data_dict['trans_mat'][k] = v.cuda(args.device)
+                
             # forward-pass
             pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
 
@@ -613,8 +601,8 @@ def main(args):
     logger = setup_logger("Graphormer", args.output_dir, get_rank())
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
-    args.resource = ['radar','master_image','master_depth','sub_image','sub_depth',] if args.train else args.resource.replace(' ','').split(',')
-    if not args.resource:
+    args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth',] if args.train else args.inputs.replace(' ','').split(',')
+    if not args.inputs:
         raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
     smpl = SMPLXModel(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, device=args.device).to(args.device)
@@ -775,7 +763,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='ImmDataset')
     parser.add_argument('--num_points', type=int, default=1024)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
-    parser.add_argument('--resource', type=str, default='radar,master_image,master_depth,sub_image,sub_depth', help='input data')
+    parser.add_argument('--inputs', type=str, default='radar,master_image,master_depth,sub_image,sub_depth', help='input data')
     parser.add_argument('--trans_coor_to_cam', action="store_true")
     #########################################################
     # Loading/saving checkpoints
@@ -861,6 +849,7 @@ def parse_args():
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
     parser.add_argument('--max_position_embeddings', type=int, default=677)
+    parser.add_argument('--single_input_ratio', type=float, default=0.)
 
     args = parser.parse_args()
     return args

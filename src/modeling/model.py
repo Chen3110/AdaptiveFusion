@@ -1,9 +1,3 @@
-"""
-Copyright (c) Microsoft Corporation.
-Licensed under the MIT license.
-
-"""
-
 import random
 import torch
 import numpy as np
@@ -20,31 +14,46 @@ class FusionGraphormer(torch.nn.Module):
         self.upsampling = torch.nn.Linear(655, 2619)
         self.upsampling2 = torch.nn.Linear(2619, 10475)
         self.grid_feat_dim = torch.nn.Linear(1024, 2051)
-        self.image_feat_dim = torch.nn.Linear(2048, 1024)
-        
-        self.point_feat_num_dim = torch.nn.Linear(num_cluster_feat, 1)
-        self.point_feat_dim = torch.nn.Linear(2048, 1024)
+        self.cluster_feat_num_dim = torch.nn.Linear(num_cluster_feat, 1)
         self.point_embedding = torch.nn.Linear(3, 2051)
-        
         self.GIM = Transformer(dim=2048, depth=3, heads=8, dim_head=256, mlp_dim=4096)
-
-    def process_image(self, images):
+        self.global_embedding = torch.nn.Embedding(5, 2048)
+        self.local_embedding = torch.nn.Embedding(5, 2051)
+        self.calib_embedding = torch.nn.Linear(12, 2051)
+        
+        self.input_indices = []
+        
+    def process_image(self, images, pos_emb, calib_emb=None):
         # extract grid features and global image features using a CNN backbone
         image_feat, grid_feat = self.image_backbone(images)
         # process grid features
         grid_feat = torch.flatten(grid_feat, start_dim=2)
         grid_feat = grid_feat.transpose(1,2)
         grid_feat = self.grid_feat_dim(grid_feat)
-        return image_feat.view(images.shape[0],1,2048), grid_feat
+        # add embeddings
+        embeddings = torch.full((images.shape[0], 1), pos_emb, dtype=torch.long, device=images.device)
+        global_pos_emb = self.global_embedding(embeddings)
+        local_pos_emb = self.local_embedding(embeddings)
+        image_feat = image_feat.view(images.shape[0],1,2048) + global_pos_emb
+        grid_feat += local_pos_emb
+        
+        return image_feat, grid_feat
 
-    def process_point(self, points):
+    def process_point(self, points, pos_emb, calib_emb=None):
         # extract cluster features and global point features using a PointNet backbone
-        xyz, cluster_feat = self.point_backbone(xyz=points[:,:,:3].contiguous(), features=points[:,:,3:].transpose(1,2).contiguous())
-        xyz_embedding = self.point_embedding(xyz)
-        point_feat = self.point_feat_num_dim(cluster_feat).squeeze()
+        xyz, cluster_feat = self.point_backbone(xyz=points[:,:,:3].contiguous(),features=points[:,:,3:].transpose(1,2).contiguous())
+        point_feat = self.cluster_feat_num_dim(cluster_feat).squeeze()
         cluster_feat = torch.cat([xyz, cluster_feat.transpose(1,2).contiguous()], dim=2)
-        cluster_feat = xyz_embedding + cluster_feat
-        return point_feat.view(points.shape[0],1,2048), cluster_feat
+        # add embeddings
+        xyz_embedding = self.point_embedding(xyz)
+        cluster_feat += xyz_embedding
+        embeddings = torch.full((points.shape[0], 1), pos_emb, dtype=torch.long, device=points.device)
+        global_pos_emb = self.global_embedding(embeddings)
+        local_pos_emb = self.local_embedding(embeddings)
+        point_feat = point_feat.view(points.shape[0],1,2048) + global_pos_emb
+        cluster_feat += local_pos_emb
+
+        return point_feat, cluster_feat
     
     def forward(self, args, data_dict, smpl, mesh_sampler, meta_masks=None, is_train=False):
         batch_size = data_dict['joints_3d'].shape[0]
@@ -60,7 +69,7 @@ class FusionGraphormer(torch.nn.Module):
         template_vertices_sub = mesh_sampler.downsample(template_vertices)
         template_vertices_sub2 = mesh_sampler.downsample(template_vertices_sub, n1=1, n2=2)
 
-        # template mesh-to-joint regression 
+        # template mesh-to-joint regression
         template_3d_joints = template_res['joints'][:, :22]
         template_pelvis = template_3d_joints[:, 0, :]
         num_joints = template_3d_joints.shape[1]
@@ -73,57 +82,76 @@ class FusionGraphormer(torch.nn.Module):
         ref_vertices = torch.cat([template_3d_joints, template_vertices_sub2],dim=1)
         ref_vertices = ref_vertices.expand(batch_size, -1, -1)
 
-        if is_train:       
-            # modality mask
-            modality_indices = gen_random_indices(max_random_num=len(args.resource), random_ratio=1.)
-            for i in modality_indices:
-                data_dict[args.resource[i]] = torch.Tensor([[]])
+        if is_train:
+            # input mask
+            inputs = args.inputs.copy()
+            # increase the probability of single input
+            if np.random.rand() < args.single_input_ratio:
+                input_mask_indices = gen_random_indices(max_random_num=len(inputs), size=4)
+            else:
+                input_mask_indices = gen_random_indices(max_random_num=len(inputs))
+            self.input_indices.append(list(np.delete(np.arange(5), input_mask_indices)))
+            for i in input_mask_indices:
+                data_dict[inputs[i]] = torch.Tensor([[]])
+                inputs[i] = ''
             # conduct image mask if image and point modalities are both active
-            if {1, 3} & set(modality_indices) and {0, 2, 4} & set(modality_indices):
+            if {'master_image','sub_image'} & set(inputs) and {'radar','master_depth','sub_depth'} & set(inputs):
                 image_mask = np.ones((batch_size, 1, 1, 1))
                 # generate mask indices of batch
-                image_indices = gen_random_indices(batch_size, args.image_mask_ratio)
+                image_indices = gen_random_indices(batch_size, random_ratio=args.image_mask_ratio)
                 image_mask[image_indices] = 0.0
                 image_mask = torch.from_numpy(image_mask).float().to(args.device)
                 image_mask = image_mask.expand(-1, 3, 224, 224)
-                if 1 in modality_indices:
+                if 'master_image' in inputs:
                     data_dict['master_image'] *= image_mask
-                if 3 in modality_indices:
+                if 'sub_image' in inputs:
                     data_dict['sub_image'] *= image_mask
         
         global_feats = []
         local_feats = []
         
+        # extract global and local features
+        # for i, input in enumerate(args.inputs):
+        #     if data_dict[input].shape[1]:
+        #         if input == 'master_image' or input == 'sub_image':
+        #             calib_emb = data_dict
+        #             gloabl_feat, local_feat = self.process_image(data_dict[input], pos_emb=i, calib_emb=calib_emb)
+        #         else:
+        #             gloabl_feat, local_feat = self.process_point(data_dict[input], pos_emb=i)
+        #         global_feats.append(gloabl_feat)
+        #         local_feats.append(local_feat)
+                
         if data_dict['radar'].shape[1]:
-            radar_gloabl_feat, radar_local_feat = self.process_point(data_dict['radar'])
+            radar_gloabl_feat, radar_local_feat = self.process_point(data_dict['radar'], pos_emb=0)
             global_feats.append(radar_gloabl_feat)
             local_feats.append(radar_local_feat)
             
         if data_dict['master_image'].shape[1]:
-            mas_img_gloabl_feat, mas_img_local_feat = self.process_image(data_dict['master_image'])
+            mas_img_gloabl_feat, mas_img_local_feat = self.process_image(data_dict['master_image'], pos_emb=1)
             global_feats.append(mas_img_gloabl_feat)
             local_feats.append(mas_img_local_feat)
             
         if data_dict['master_depth'].shape[1]:
-            mas_depth_gloabl_feat, mas_depth_local_feat = self.process_point(data_dict['master_depth'])
+            mas_depth_gloabl_feat, mas_depth_local_feat = self.process_point(data_dict['master_depth'], pos_emb=2)
             global_feats.append(mas_depth_gloabl_feat)
             local_feats.append(mas_depth_local_feat)
             
         if data_dict['sub_image'].shape[1]:
-            sub_img_gloabl_feat, sub_img_local_feat = self.process_image(data_dict['sub_image'])
+            sub_img_gloabl_feat, sub_img_local_feat = self.process_image(data_dict['sub_image'], pos_emb=3)
             global_feats.append(sub_img_gloabl_feat)
             local_feats.append(sub_img_local_feat)
             
         if data_dict['sub_depth'].shape[1]:
-            sub_depth_gloabl_feat, sub_depth_local_feat = self.process_point(data_dict['sub_depth'])
+            sub_depth_gloabl_feat, sub_depth_local_feat = self.process_point(data_dict['sub_depth'], pos_emb=4)
             global_feats.append(sub_depth_gloabl_feat)
             local_feats.append(sub_depth_local_feat)
             
-        if is_train:
-            # shuffle global and local features
-            feat_zip = list(zip(global_feats, local_feats))
-            random.shuffle(feat_zip)
-            global_feats, local_feats = zip(*feat_zip)
+        # if is_train:
+        #     # shuffle global and local features
+        #     feat_zip = list(zip(global_feats, local_feats))
+        #     random.shuffle(feat_zip)
+        #     global_feats, local_feats = zip(*feat_zip)
+            
         # concatinate global and local features
         global_feats = torch.cat(global_feats, dim=1)
         local_feats = torch.cat(local_feats, dim=1)

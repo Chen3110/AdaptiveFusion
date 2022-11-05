@@ -1,9 +1,3 @@
-"""
-Copyright (c) Microsoft Corporation.
-Licensed under the MIT license.
-
-"""
-
 import cv2
 import os.path as op
 import numpy as np
@@ -38,7 +32,7 @@ class FusionDataset():
         self.full_data = {}
         for path in self.seq_paths:
             # init result loader, reindex
-            seq_loader = Sequence_Loader(path, self.args.skip_head, self.args.skip_tail, resource=self.args.resource)
+            seq_loader = Sequence_Loader(path, self.args.skip_head, self.args.skip_tail, resource=self.args.inputs)
             self.full_data.update({path:seq_loader})
             self.index_map.append(self.index_map[-1] + len(seq_loader))
             
@@ -74,7 +68,7 @@ class FusionDataset():
             return torch.zeros((padding_points, 6)).float()
         if mask:
             # mask points
-            indices = np.random.choice(pcl.shape[0], 100, replace=False)
+            indices = np.random.choice(pcl.shape[0], 100)
             pcl = pcl[indices]
         if trans_mat is not None:
             trans_pcl = (pcl[:,:3] - trans_mat['t']) @ trans_mat['R']
@@ -89,7 +83,7 @@ class FusionDataset():
     def gen_mask(self, num_mask, mask_ratio):
         mask = np.ones((num_mask))
         if self.args.train:
-            indices = gen_random_indices(num_mask, mask_ratio)
+            indices = gen_random_indices(num_mask, random_ratio=mask_ratio)
             mask[indices] = 0.0
         return torch.from_numpy(mask).float()
     
@@ -105,15 +99,15 @@ class FusionDataset():
         joints = mesh['joints'][:22]
 
         # process image
-        mas_img = torch.Tensor([[]])
-        if 'master_image' in self.args.resource:
-            trans_mat_mas = seq_loader.calib['kinect_master']
+        mas_img = torch.Tensor([])
+        trans_mat_mas = seq_loader.calib['kinect_master']
+        if 'master_image' in self.args.inputs:
             joints_mas = (joints - trans_mat_mas['t']) @ trans_mat_mas['R']
             mas_img = self.process_image(frame['master_image'], joints_mas)
 
-        sub_img = torch.Tensor([[]])
-        if 'sub_image' in self.args.resource:
-            trans_mat_sub = seq_loader.calib['kinect_sub']
+        sub_img = torch.Tensor([])
+        trans_mat_sub = seq_loader.calib['kinect_sub']
+        if 'sub_image' in self.args.inputs:
             joints_sub = (joints - trans_mat_sub['t']) @ trans_mat_sub['R']
             sub_img = self.process_image(frame['sub_image'], joints_sub)
         
@@ -122,14 +116,14 @@ class FusionDataset():
         trans_pose = pose
         trans_mat_to_cam = None
         if self.args.trans_coor_to_cam:
-            if 'master_image' in self.args.resource:
+            if 'master_image' in self.args.inputs:
                 trans_mat_to_cam = trans_mat_mas
                 trans_joints = joints_mas
-            elif 'sub_image' in self.args.resource:
+            elif 'sub_image' in self.args.inputs:
                 trans_mat_to_cam = trans_mat_sub
                 trans_joints = joints_sub
             else:
-                raise RuntimeError("Kinect image must in resource.")
+                raise RuntimeError("Kinect image must in inputs.")
             rev_trans_mat = {'R':np.asarray(trans_mat_to_cam['R']).T, 't':-np.asarray(trans_mat_to_cam['R']).T @ trans_mat_to_cam['t']}
             trans, root_orient = self.mosh_pose_transform(pose[:3], pose[3:6], joints[0], rev_trans_mat)
             trans_pose = np.hstack((trans, root_orient.reshape(-1), pose[6:]))
@@ -138,8 +132,8 @@ class FusionDataset():
         joint_center = ((trans_joints.max(axis=0) + trans_joints.min(axis=0))/2)[:3]
         
         # process radar pcl
-        radar_pcl = torch.Tensor([[]])
-        if 'radar' in self.args.resource:
+        radar_pcl = torch.Tensor([])
+        if 'radar' in self.args.inputs:
             radar_pcl = frame['radar']
             radar_pcl[:,3:] /= np.array([5e-38, 5., 150.])
             radar_pcl = self.process_pcl(radar_pcl, joints, trans_mat_to_cam)
@@ -150,19 +144,24 @@ class FusionDataset():
             mask = True if random_value >= 0.7 else False
         else:
             mask = False
-        mas_depth = torch.Tensor([[]])
-        if 'master_depth' in self.args.resource:
+        mas_depth = torch.Tensor([])
+        if 'master_depth' in self.args.inputs:
             mas_depth = frame['master_depth']
             mas_depth = self.process_pcl(mas_depth, joints, trans_mat_to_cam, padding_points=4096, mask=mask)
         
-        sub_depth = torch.Tensor([[]])
-        if 'sub_depth' in self.args.resource:
+        sub_depth = torch.Tensor([])
+        if 'sub_depth' in self.args.inputs:
             sub_depth = frame['sub_depth']
             sub_depth = self.process_pcl(sub_depth, joints, trans_mat_to_cam, padding_points=4096, mask=mask)
             
         # masking tokens
         joint_mask = self.gen_mask(num_mask=22, mask_ratio=0.3).unsqueeze(-1)
         vert_mask = self.gen_mask(num_mask=655, mask_ratio=0.3).unsqueeze(-1)
+        trans_mat = {
+            'radar': torch.tensor([1,0,0,0,1,0,0,0,1,0,0,0]).float(),
+            'master': torch.from_numpy(np.vstack([trans_mat_mas['R'], trans_mat_mas['t']]).reshape(-1)).float(),
+            'sub': torch.from_numpy(np.vstack([trans_mat_sub['R'], trans_mat_sub['t']]).reshape(-1)).float(),
+        }
         
         # return result
         result = {}
@@ -181,6 +180,7 @@ class FusionDataset():
         result['sub_image'] = sub_img
         result['master_depth'] = mas_depth
         result['sub_depth'] = sub_depth
+        result['trans_mat'] = trans_mat
         
         return result
 
