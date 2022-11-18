@@ -132,22 +132,23 @@ def rectify_pose(pose):
     pose[:3] = cv2.Rodrigues(new_root)[0].reshape(3)
     return pose
 
-def show_att_weight(vertices_sub2, joints_3d, attention, seed_points, joint_id, image, pcl, gt_pelvis):
+def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pred_verts_sub2, gt_pelvis, idx):
+    for k, v in cluster_centers.items():
+        cluster_centers[k] = c2c(v)
+        
     heads_num, vertex_num, _ = attention.shape
-    all_head = np.zeros((vertex_num,vertex_num))
-
-    # compute avg attention for 4 attention heads
+    all_head = np.zeros((vertex_num, vertex_num))
+    # compute avg attention for all attention heads
     for h in range(heads_num):
         att_per_img = attention[h]
-        all_head = all_head + att_per_img   
-    all_head = all_head/4
-
+        all_head = all_head + att_per_img
+    all_head = all_head / heads_num
     col_sums = all_head.sum(axis=0)
     all_head = all_head / col_sums[np.newaxis, :]
 
     # select the joint to show attention
-    ref_joint = joints_3d[joint_id]
-    attention_to_show = all_head[joint_id][22:758:]
+    ref_joint = pred_joints[args.joint_id]
+    attention_to_show = all_head[args.joint_id][22:]
     # nomalize attention
     min_v = np.min(attention_to_show)
     max_v = np.max(attention_to_show)
@@ -158,57 +159,77 @@ def show_att_weight(vertices_sub2, joints_3d, attention, seed_points, joint_id, 
     verts_lines = []
     verts_line_colors = []
     thres = 0.1
-    for i in range(vertices_sub2.shape[0]):
+    for i in range(pred_verts_sub2.shape[0]):
         if norm_attention_to_show[i] > thres:
-            verts_to_show.append(vertices_sub2[i])
+            verts_to_show.append(pred_verts_sub2[i])
             verts_lines.append([0, len(verts_to_show)-1])
             verts_line_colors.append(1 + thres - norm_attention_to_show[i] * np.asarray((200, 208, 255)) / 255)
     
-    # get attention map
-    pcl_2d = project_pcl(pcl + gt_pelvis)
-    pcl_2d = np.floor(pcl_2d).astype(int)
-    img_with_cluster = image.copy()
-    center_2d = project_pcl(seed_points + gt_pelvis)
-    center_2d = np.floor(center_2d).astype(int)
-    blank = np.zeros_like(img_with_cluster[:,:,:1])
-    weight_sorted_idx = np.argsort(norm_attention_to_show[[i+704 for i in range(center_2d.shape[0])]])
-    for i in weight_sorted_idx:
-        # cv2.circle(blank, (center_2d[i, 1], center_2d[i, 0]), 60, norm_attention_to_show[i+704]*np.array([255,255,255]), -1)
-        cv2.circle(blank, (center_2d[i, 1], center_2d[i, 0]), 60, norm_attention_to_show[i+704]*255, -1)
-    blank = cv2.applyColorMap(blank, 2)
-    img_with_cluster = cv2.addWeighted(img_with_cluster, 0.2, blank, 0.5, 1)
+    orig_master_img = data_dict['orig_imgs']['master_image']
     
-    img_with_cluster[pcl_2d[:, 0], pcl_2d[:, 1]] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0]-1, pcl_2d[:, 1]-1] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0]-1, pcl_2d[:, 1]] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0], pcl_2d[:, 1]-1] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0]+1, pcl_2d[:, 1]+1] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0]+1, pcl_2d[:, 1]] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0], pcl_2d[:, 1]+1] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0]-1, pcl_2d[:, 1]+1] = [0, 255, 0]
-    img_with_cluster[pcl_2d[:, 0]+1, pcl_2d[:, 1]-1] = [0, 255, 0]
-    img_with_cluster = crop_image(joints_3d+gt_pelvis, img_with_cluster, margin=0.3, square=True)
-    img_with_cluster = cv2.resize(img_with_cluster, (224, 224))
+    def draw_pcl_att_map(pcl_input):
+        # project points to the image
+        pcl_2d = project_pcl(data_dict[pcl_input][idx] + gt_pelvis)
+        pcl_2d = np.floor(pcl_2d).astype(int)
+        # project cluster centers to the image
+        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis)
+        center_2d = np.floor(center_2d).astype(int)
+        blank = np.zeros_like(orig_master_img[:,:,:1])
+        start_idx = 655 + 49 * args.inputs.index(pcl_input)
+        # sort the weight
+        weight_sorted_idx = np.argsort(norm_attention_to_show[[i+start_idx for i in range(center_2d.shape[0])]])
+        for i in weight_sorted_idx:
+            cv2.circle(blank, (center_2d[i, 1], center_2d[i, 0]), 60, norm_attention_to_show[i+start_idx]*255, -1)
+        # apply jet color map
+        blank = cv2.applyColorMap(blank, 2)
+        img_with_cluster = cv2.addWeighted(orig_master_img, 0.2, blank, 0.5, 1)
+        # plot cluster centers in the image
+        for i in range(-1, 2):
+            for j in range(-1, 2):
+                img_with_cluster[pcl_2d[:,0]+i, pcl_2d[:,1]+j] = [0, 255, 0]
+        # crop the image area of people
+        img_with_cluster = crop_image(pred_joints+gt_pelvis, img_with_cluster, margin=0.3, square=True)
+        img_with_cluster = cv2.resize(img_with_cluster, (224, 224))
+        return img_with_cluster
     
-    image = crop_image(joints_3d+gt_pelvis, image, margin=0.3, square=True)
-    image = cv2.resize(image, (224, 224))
-    box_width = image.shape[0]//7
-    blank = np.zeros_like(image[:,:,:1])
-    for i in range(7):
-        for j in range(7):
-            cv2.rectangle(blank, (i*box_width,j*box_width), ((i+1)*box_width,(j+1)*box_width), norm_attention_to_show[i*7+j+655]*255, -1)
-    blank = cv2.applyColorMap(blank, 2)
-    img_with_grid = cv2.addWeighted(image, 0.5, blank, 0.5, 1)
-    heatmap = np.hstack((img_with_cluster, img_with_grid))
+    def draw_img_att_map(img_input):
+        # crop the image area of people
+        croped_img = crop_image(joints=pred_joints+gt_pelvis, image=data_dict[img_input][idx], 
+                                trans_mat=data_dict['trans_mat'][img_input], margin=0.3, square=True, cam=img_input[:-6])
+        croped_img = cv2.resize(croped_img, (224, 224))
+        grid_width = croped_img.shape[0]//7
+        blank = np.zeros_like(croped_img[:,:,:1])
+        start_idx = 655 + 49 * args.inputs.index(img_input)
+        # plot grid
+        for i in range(7):
+            for j in range(7):
+                cv2.rectangle(blank,(i*grid_width,j*grid_width),((i+1)*grid_width,(j+1)*grid_width),
+                            norm_attention_to_show[i*7+j+start_idx]*255, -1)
+        # apply jet color map
+        blank = cv2.applyColorMap(blank, 2)
+        img_with_grid = cv2.addWeighted(croped_img, 0.5, blank, 0.5, 1)
+        return img_with_grid
+    
+    img_to_show = []
+    # draw point attention map
+    for pcl_input in ['radar', 'master_depth', 'sub_depth']:
+        if pcl_input in args.inputs:
+            img_to_show.append(draw_pcl_att_map(pcl_input))
+
+    # draw image attention map
+    for img_input in ['master_image', 'sub_image']:
+        if img_input in args.inputs:
+            img_to_show.append(draw_img_att_map(img_input))
+    
+    heatmap = np.hstack(img_to_show)
     cv2.imwrite('heatmap.png', heatmap)
-    
     cv2.namedWindow('heatmap', 0)
     cv2.resizeWindow("heatmap", 640, 480)
     cv2.imshow('heatmap', heatmap)
     cv2.waitKey(1)
 
     res = dict(
-        vert_pcl=dict(pcl=vertices_sub2, color=np.asarray([255, 181, 74])/255,),
+        vert_pcl=dict(pcl=pred_verts_sub2, color=np.asarray([255, 181, 74])/255,),
         vert_lines=dict(pcl=verts_to_show, lines=np.asarray(verts_lines), colors=verts_line_colors),
     )
 
@@ -307,18 +328,6 @@ def run(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sample
                             args.vloss_w_sub * vertices_loss(criterion_vertices, pred_vertices_sub, gt_vertices_sub, args.device) + \
                             args.vloss_w_full * vertices_loss(criterion_vertices, pred_vertices, gt_vertices, args.device))
 
-        score_loss = torch.mean(torch.abs(pred_dict.get('pred_score', torch.zeros(1, device=args.device))))
-        image_joints_loss = keypoint_3d_loss(criterion_keypoints, pred_dict.get('pred_image_joints', gt_3d_joints), gt_3d_joints, args.device)
-        point_joints_loss = keypoint_3d_loss(criterion_keypoints, pred_dict.get('pred_point_joints', gt_3d_joints), gt_3d_joints, args.device)
-        image_verts_loss = vertices_loss(criterion_vertices, pred_dict.get('pred_image_verts', gt_vertices_sub2), gt_vertices_sub2, args.device)
-        point_verts_loss = vertices_loss(criterion_vertices, pred_dict.get('pred_point_verts', gt_vertices_sub2), gt_vertices_sub2, args.device)
-        
-        loss_manager.update_loss("score_loss", args.score_loss_weight*score_loss)
-        loss_manager.update_loss("image_joints_loss", args.joints_loss_weight*image_joints_loss)
-        loss_manager.update_loss("point_joints_loss", args.joints_loss_weight*point_joints_loss)
-        loss_manager.update_loss("image_verts_loss", args.vertices_loss_weight*image_verts_loss)
-        loss_manager.update_loss("point_verts_loss", args.vertices_loss_weight*point_verts_loss)
-        
         loss_manager.update_loss("3d_joint_loss", args.joints_loss_weight*loss_3d_joints)
         loss_manager.update_loss("vertex_loss", args.vertices_loss_weight*loss_vertices)
         
@@ -412,27 +421,38 @@ def run_eval_general(args, val_dataloader, fusion_model, smpl, mesh_sampler):
     )
     return
 
-def result_generator(pcls, pred_vertices, gt_vertices, face, pred_verts_sub2, pred_joints, attention, seed_points, joint_id, images, gt_pelvis, show_att=False, pause_at_start=False):
-    for i in range(len(pcls)):
+def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attention=None, 
+                     cluster_centers=None, pred_verts_sub2=None, pred_joints=None, gt_pelvis=None):
+    for k, v in data_dict.items():
+        data_dict[k] = c2c(v)
+    for i in range(len(pred_vertices)):
         print('frame_id:', i)
         res = dict(
             radar_mesh = dict(
-                mesh = pcl2box(c2c(pcls[i])),
+                mesh = pcl2box(data_dict['radar'][i][:,:3]) if data_dict['radar'].shape[1] else None,
                 color = [0,0.8,0],
             ),
+            master_mesh = dict(
+                mesh = pcl2box(data_dict['master_depth'][i][:,:3]) if data_dict['master_depth'].shape[1] else None,
+                color = [0.8,0,0],
+            ),
+            sub_mesh = dict(
+                mesh = pcl2box(data_dict['sub_depth'][i][:,:3]) if data_dict['sub_depth'].shape[1] else None,
+                color = [0,0,0.8],
+            ),
             pred_smpl = dict(
-                mesh = [c2c(pred_vertices[i]), c2c(face)],
-                color = np.asarray([249, 239, 211]) /255
+                mesh = [c2c(pred_vertices)[i], c2c(face)],
+                color = np.asarray([179, 230, 213]) /255
                 # 179, 230, 213
             ),
             label_smpl = dict(
-                mesh = [c2c(gt_vertices[i]), c2c(face)],
+                mesh = [c2c(gt_vertices)[i], c2c(face)],
                 color = np.asarray([235, 189, 191]) / 255,
             ),
         )
-        if show_att:
-            res = show_att_weight(c2c(pred_verts_sub2[i]), c2c(pred_joints[i]), c2c(attention[i]), c2c(seed_points[i]), joint_id, c2c(images[i]), c2c(pcls[i]), c2c(gt_pelvis[i]))
-        O3DStreamPlot.pause = pause_at_start
+        if args.show_att:
+            res = show_att_weight(args, data_dict, cluster_centers, c2c(attention)[i], c2c(pred_joints)[i], c2c(pred_verts_sub2)[i], c2c(gt_pelvis)[i], i)
+        O3DStreamPlot.pause = args.pause_at_start
         yield res
 
 def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss_manager=None):
@@ -480,7 +500,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                 data_dict['trans_mat'][k] = v.cuda(args.device)
                 
             # forward-pass
-            pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
+            pred_dict, pred_3d_joints, pred_verts_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
 
             # measure errors
             error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices)
@@ -503,11 +523,11 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                 loss_manager.update_loss("PAmPJPE", np.mean(error_joints_pa))
                 loss_manager.calculate_total_loss()
 
-            if args.visual:
-                att = pred_dict.get('attention', [0])[-1]
-                seed_points = pred_dict.get('seed_points', None)
-                gen = result_generator(data_dict['radar'][:,:,:3], pred_vertices, gt_vertices, smpl.f, pred_vertices_sub2, pred_3d_joints, 
-                                    att, seed_points, args.joint_id, data_dict['orig_img'], gt_3d_pelvis, args.show_att, pause_at_start=True)
+            if args.visual and not args.train:
+                attention = pred_dict.get('attention', None)
+                cluster_centers = pred_dict.get('cluster_centers', None)
+                gen = result_generator(args, data_dict, pred_vertices, gt_vertices, smpl.f, attention, 
+                                       cluster_centers, pred_verts_sub2, pred_3d_joints, gt_3d_pelvis)
                 batch += 1
                 if batch > args.max_num_batch:
                     return 0, 0, 0, 0
@@ -601,7 +621,7 @@ def main(args):
     logger = setup_logger("Graphormer", args.output_dir, get_rank())
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
-    args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth',] if args.train else args.inputs.replace(' ','').split(',')
+    args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth'] if args.train else args.inputs.replace(' ','').split(',')
     if not args.inputs:
         raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
@@ -689,13 +709,14 @@ def main(args):
         backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
         
-        pcl_backbone = PointnetSAModule(npoint=args.num_cluster_feat, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
+        radar_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
+        depth_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=64, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
         
-        backbone = dict(image=img_backbone, point=pcl_backbone)
+        backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
 
         # build end-to-end Graphormer network (backbone + multi-layer graphormer encoder)
         Model = getattr(Models, args.model)
-        _model = Model(backbone, trans_encoder, args.num_cluster_feat)
+        _model = Model(backbone, trans_encoder)
 
         start_epoch = 0
         if args.resume_checkpoint!=None and args.resume_checkpoint!='None':
@@ -722,6 +743,7 @@ def main(args):
         for iter_layer in range(4):
             _model.trans_encoder[-1].bert.encoder.layer[iter_layer].attention.self.output_attentions = True
         setattr(_model.trans_encoder[-1].config,'device', args.device)
+        args.data_path = '/home/nesc525/drivers/0/dataset'
 
     _model.to(args.device)
     logger.info("Training parameters %s", args)
@@ -730,6 +752,8 @@ def main(args):
 
     if args.train==True:
         train_size = int(0.9 * len(dataset))
+        if args.radar_only or args.image_only or args.depth_only:
+            train_size = int(0.05 * len(dataset))
         eval_size = len(dataset) - train_size
         dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
         train_dataloader = make_data_loader(args, dataset_train, args.distributed, is_train=True, 
@@ -750,7 +774,7 @@ def parse_args():
     #########################################################
     parser.add_argument("--data_path", default='/home/nesc525/drivers/6/dataset', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
-    parser.add_argument("--num_workers", default=30, type=int, 
+    parser.add_argument("--num_workers", default=4, type=int, 
                         help="Workers in dataloader.")
     parser.add_argument("--img_scale_factor", default=1, type=int, 
                         help="adjust image resolution.") 
@@ -760,7 +784,7 @@ def parse_args():
     parser.add_argument('--use_pkl', dest="use_pkl", action="store_true", help='use pkl data')
     parser.add_argument('--skip_head', type=int, default=0)
     parser.add_argument('--skip_tail', type=int, default=0)
-    parser.add_argument('--dataset', type=str, default='ImmDataset')
+    parser.add_argument('--dataset', type=str, default='FusionDataset')
     parser.add_argument('--num_points', type=int, default=1024)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
     parser.add_argument('--inputs', type=str, default='radar,master_image,master_depth,sub_image,sub_depth', help='input data')
@@ -779,9 +803,9 @@ def parse_args():
     #########################################################
     # Training parameters
     #########################################################
-    parser.add_argument("--per_gpu_train_batch_size", default=30, type=int, 
+    parser.add_argument("--per_gpu_train_batch_size", default=10, type=int, 
                         help="Batch size per GPU/CPU for training.")
-    parser.add_argument("--per_gpu_eval_batch_size", default=30, type=int, 
+    parser.add_argument("--per_gpu_eval_batch_size", default=10, type=int, 
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument('--lr', "--learning_rate", default=1e-4, type=float, 
                         help="The initial lr.")
@@ -825,6 +849,7 @@ def parse_args():
     #########################################################
     parser.add_argument('--train', dest="train", action="store_true", help='train or test')
     parser.add_argument('--visual', dest="visual", action="store_true", help='visual')
+    parser.add_argument('--pause_at_start', action="store_true")
     parser.add_argument('--logging_steps', type=int, default=1000, 
                         help="Log every X steps.")
     parser.add_argument("--device", type=str, default='cuda', 
@@ -840,16 +865,17 @@ def parse_args():
     parser.add_argument('--image_mask_ratio', type=float, default=0.3)
     parser.add_argument('--point_mask_ratio', type=float, default=0.3)
     parser.add_argument('--points_w_image_feat', action="store_true")
+    parser.add_argument('--radar_only', action="store_true")
+    parser.add_argument('--image_only', action="store_true")
+    parser.add_argument('--depth_only', action="store_true")
     parser.add_argument('--wo_GIM', action="store_true")
-    parser.add_argument('--images_only', action="store_true")
-    parser.add_argument('--points_only', action="store_true")
-    parser.add_argument('--cat_global_feat', action="store_true")
-    parser.add_argument('--only_grid_feat', action="store_true")
-    parser.add_argument('--only_cluster_feat', action="store_true")
+    parser.add_argument('--wo_local_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
     parser.add_argument('--max_position_embeddings', type=int, default=677)
     parser.add_argument('--single_input_ratio', type=float, default=0.)
+    parser.add_argument('--calib_emb', action="store_true")
+    parser.add_argument('--shuffle_inputs', action="store_true")
 
     args = parser.parse_args()
     return args

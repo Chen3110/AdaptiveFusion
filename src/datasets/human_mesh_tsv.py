@@ -223,7 +223,6 @@ class MeshTSVDataset(object):
             return len(self.line_list)
 
     def __getitem__(self, idx):
-
         img = self.get_image(idx)
         img_key = self.get_img_key(idx)
         annotations = self.get_annotations(idx)

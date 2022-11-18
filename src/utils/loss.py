@@ -55,7 +55,7 @@ class LossManager():
         plt.close()
         cv2.imwrite(os.path.join(output_path, 'loss.png'), img)
         if self.ding_bot is not None:
-            self.ding_bot.add_md("train_mmGraphormer", "【IMG】 \n ![img]({}) \n 【LOSS】\n epoch={}, loss={}".format(self.ding_bot.img2b64(img), epoch, total_loss[-1]))
+            self.ding_bot.add_md("train_mmGraphormer", "【IMG】 \n ![img]({}) \n 【{}】\n epoch={}, loss={}".format(self.ding_bot.img2b64(img), output_path, epoch, total_loss[-1]))
             self.ding_bot.enable()
         
         self.loss_dict = {}

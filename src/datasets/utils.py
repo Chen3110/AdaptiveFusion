@@ -18,7 +18,8 @@ INTRINSIC = {
 
 
 class Sequence_Loader(object):
-    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, resource=['radar', 'master_image'], **kwargs) -> None:
+    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
+                 resource=['radar','master_image','master_image','sub_image','sub_depth'], **kwargs) -> None:
         self.seq_path = seq_path
         self.skip_head = skip_head
         self.skip_tail = skip_tail

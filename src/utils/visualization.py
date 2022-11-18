@@ -262,6 +262,10 @@ class EvaluateStreamPlot(O3DStreamPlot):
         self.plot_funcs = dict(
             radar_pcl=o3d_pcl,
             radar_mesh=o3d_mesh,
+            master_pcl=o3d_pcl,
+            master_mesh=o3d_mesh,
+            sub_pcl=o3d_pcl,
+            sub_mesh=o3d_mesh,
             pred_smpl=o3d_mesh,
             label_smpl=o3d_mesh,
             vert_pcl=o3d_pcl,
