@@ -17,7 +17,7 @@ INTRINSIC = {
 }
 
 
-class Sequence_Loader(object):
+class SequenceLoader(object):
     def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
                  resource=['radar','master_image','master_image','sub_image','sub_depth'], **kwargs) -> None:
         self.seq_path = seq_path
@@ -53,15 +53,21 @@ class Sequence_Loader(object):
             
         return result
 
+def copy2cpu(tensor):
+    if isinstance(tensor, np.ndarray):
+        return tensor
+    return tensor.detach().cpu().numpy()
 
-def project_pcl(pcl, cam='master'):
-    pcl_2d = []
-    for p in pcl:
-        point_2d = (INTRINSIC[cam] @ p/p[2])[:2]
-        pcl_2d.append(point_2d)
-    pcl_2d = np.asarray(pcl_2d)
+def project_pcl(pcl, trans_mat=None, cam='master', image_size=np.array([1536,2048])):
+    if trans_mat is not None:
+        pcl = (pcl - trans_mat['t']) @ trans_mat['R']
+    pcl_2d = ((pcl/pcl[:,2:3]) @ INTRINSIC[cam].T)[:,:2]
+    pcl_2d = np.floor(pcl_2d).astype(int)
     pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
-
+    # filter out the points exceeding the image size
+    pcl_2d = np.where(pcl_2d<image_size-1, pcl_2d, image_size-1)
+    pcl_2d = np.where(pcl_2d>0, pcl_2d, 0)
+    
     return pcl_2d
 
 
@@ -105,7 +111,7 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
     joint_max = joints.max(axis=0) + margin
     joint_min = joints.min(axis=0) - margin
     # get 3d bounding box from joints
-    box_3d = [
+    box_3d = np.array([
         [joint_min[0], joint_min[1], joint_min[2]],
         [joint_min[0], joint_min[1], joint_max[2]],
         [joint_min[0], joint_max[1], joint_max[2]],
@@ -114,13 +120,9 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
         [joint_max[0], joint_min[1], joint_max[2]],
         [joint_max[0], joint_max[1], joint_min[2]],
         [joint_max[0], joint_min[1], joint_min[2]],
-    ]
-    box_2d = []
+    ])
     # project 3d bounding box to 2d image plane
-    for p in box_3d:
-        box_2d.append((INTRINSIC[cam] @ p/p[2])[:2])
-    box_2d = np.floor(box_2d).astype(int)
-    box_2d[:, [0, 1]] = box_2d[:, [1, 0]]
+    box_2d = project_pcl(box_3d, cam=cam)
     box_min = box_2d.min(0)
     box_max = box_2d.max(0)
     if square:
@@ -133,7 +135,7 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
             box_max[0] += diff
             box_min[0] -= diff
     box_max = np.where(box_max<image.shape[:2], box_max, image.shape[:2])
-    box_min = np.where(box_min>0, box_min, 0)        
+    box_min = np.where(box_min>0, box_min, 0)
     # crop image
     crop_img = image[box_min[0]:box_max[0], box_min[1]:box_max[1]]
 
@@ -146,11 +148,21 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
 
     return crop_img
 
+def trans_mat_2_tensor(trans_mat):
+    trans_mat_array = np.hstack((trans_mat['R'], np.array([trans_mat['t']]).T))
+    trans_mat_array = np.vstack((trans_mat_array, [0,0,0,1]))
+    return trans_mat_array
+
+def trans_mat_2_dict(trans_mat):
+    trans_mat = copy2cpu(trans_mat)
+    trans_mat_dict = {
+        'R': trans_mat[:3, :3],
+        't': trans_mat[:3, 3]
+    }
+    return trans_mat_dict
 
 def get_rgb_value(pcl, image, visual=False, ret_image=False):
     pcl_2d = project_pcl(pcl)
-    pcl_2d = np.floor(pcl_2d).astype(int)
-
     pcl_color = image[pcl_2d[:, 0], pcl_2d[:, 1]]
     pcl_with_feature = np.hstack((pcl, pcl_color/255))
 
@@ -211,3 +223,10 @@ def gen_random_indices(max_random_num, min_random_num=0, random_ratio=1., random
     num_indices = np.floor(pb*random_ratio*(max_random_num-min_random_num)) if not size else size
     indices = np.random.choice(np.arange(min_random_num, max_random_num), replace=False, size=int(num_indices))
     return np.sort(indices)
+
+def mosh_pose_transform(trans, root_orient, root_joint, trans_mat):
+    mosh_offset = root_joint - trans
+    new_trans = trans_mat['R'] @ (trans + mosh_offset) + trans_mat['t'] - mosh_offset
+    orient_mat = trans_mat['R'] @ cv2.Rodrigues(root_orient)[0]
+    new_orient = cv2.Rodrigues(orient_mat)[0]
+    return new_trans, new_orient

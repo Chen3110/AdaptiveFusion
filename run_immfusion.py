@@ -18,7 +18,7 @@ import gc
 import numpy as np
 import cv2
 from openpyxl import load_workbook, Workbook
-from src.datasets.utils import convert_square_image, crop_image, project_pcl
+from src.datasets.utils import copy2cpu, convert_square_image, crop_image, project_pcl
 
 from src.modeling.bert import BertConfig, Graphormer
 import src.modeling.bert.e2e_body_network as Models
@@ -43,10 +43,6 @@ from azureml.core.run import Run
 from src.utils.dingtalk import TimerBot
 
 aml_run = Run.get_context()
-
-def c2c(tensor):
-    if isinstance(tensor, np.ndarray): return tensor
-    return tensor.detach().cpu().numpy()
 
 def save_checkpoint(model, args, epoch, iteration, num_trial=10):
     checkpoint_dir = op.join(args.output_dir, 'checkpoint',
@@ -402,21 +398,21 @@ def res_generator(pcls, pred_vertices, gt_vertices, face, pred_verts_sub2, pred_
         print('frame_id:', i)
         res = dict(
             radar_mesh = dict(
-                mesh = pcl2box(c2c(pcls[i])),
+                mesh = pcl2box(copy2cpu(pcls[i])),
                 color = [0,0.8,0],
             ),
             pred_smpl = dict(
-                mesh = [c2c(pred_vertices[i]), c2c(face)],
+                mesh = [copy2cpu(pred_vertices[i]), copy2cpu(face)],
                 color = np.asarray([249, 239, 211]) /255
                 # 179, 230, 213
             ),
             label_smpl = dict(
-                mesh = [c2c(gt_vertices[i]), c2c(face)],
+                mesh = [copy2cpu(gt_vertices[i]), copy2cpu(face)],
                 color = np.asarray([235, 189, 191]) / 255,
             ),
         )
         if show_att:
-            res = show_att_weight(c2c(pred_verts_sub2[i]), c2c(pred_joints[i]), c2c(attention[i]), c2c(seed_points[i]), joint_id, c2c(images[i]), c2c(pcls[i]), c2c(gt_pelvis[i]))
+            res = show_att_weight(copy2cpu(pred_verts_sub2[i]), copy2cpu(pred_joints[i]), copy2cpu(attention[i]), copy2cpu(seed_points[i]), joint_id, copy2cpu(images[i]), copy2cpu(pcls[i]), copy2cpu(gt_pelvis[i]))
         O3DStreamPlot.pause = pause_at_start
         yield res
 
@@ -532,8 +528,8 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
         output_path = os.path.join(args.output_dir, 'error', args.test_scene)
         if not os.path.isdir(output_path):
             os.makedirs(output_path)
-        j_err = c2c(torch.vstack(per_joint_err))
-        v_err = c2c(torch.vstack(per_vertex_err))
+        j_err = copy2cpu(torch.vstack(per_joint_err))
+        v_err = copy2cpu(torch.vstack(per_vertex_err))
         np.save(os.path.join(output_path, "per_joint_err"), j_err)
         np.save(os.path.join(output_path, "per_vertex_err"), v_err)
         print("mean joint err (cm):", np.mean(j_err)*100)
@@ -686,10 +682,8 @@ def show_att_weight(vertices_sub2, joints_3d, attention, seed_points, joint_id, 
     
     # get attention map
     pcl_2d = project_pcl(pcl + gt_pelvis)
-    pcl_2d = np.floor(pcl_2d).astype(int)
     img_with_cluster = image.copy()
     center_2d = project_pcl(seed_points + gt_pelvis)
-    center_2d = np.floor(center_2d).astype(int)
     blank = np.zeros_like(img_with_cluster[:,:,:1])
     weight_sorted_idx = np.argsort(norm_attention_to_show[[i+704 for i in range(center_2d.shape[0])]])
     for i in weight_sorted_idx:

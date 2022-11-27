@@ -1,3 +1,4 @@
+import copy
 import random
 import torch
 import numpy as np
@@ -5,9 +6,9 @@ from src.datasets.utils import gen_random_indices
 from src.modeling.bert.transformer import Transformer
 
 
-class FusionGraphormer(torch.nn.Module):
+class AdaptiveFusion(torch.nn.Module):
     def __init__(self, backbone, trans_encoder):
-        super(FusionGraphormer, self).__init__()
+        super(AdaptiveFusion, self).__init__()
         self.radar_backbone = backbone['radar']
         self.image_backbone = backbone['image']
         self.depth_backbone = backbone['depth']
@@ -25,7 +26,7 @@ class FusionGraphormer(torch.nn.Module):
         
         self.input_indices = []
         
-    def process_image(self, images, pos_emb, calib_emb=None):
+    def process_image(self, images, pos_emb):
         # extract grid features and global image features using a CNN backbone
         image_feat, grid_feat = self.image_backbone(images)
         # process grid features
@@ -38,13 +39,10 @@ class FusionGraphormer(torch.nn.Module):
         local_pos_emb = self.local_embedding(embeddings)
         image_feat = image_feat.view(images.shape[0],1,2048) + global_pos_emb
         grid_feat += local_pos_emb
-        if calib_emb is not None:
-            calib_embbedings = self.calib_embedding(calib_emb).unsqueeze(1)
-            grid_feat += calib_embbedings
         
         return image_feat, grid_feat
 
-    def process_point(self, points, pos_emb, calib_emb=None):
+    def process_point(self, points, pos_emb):
         # extract cluster features and global point features using a PointNet backbone
         if points.shape[1] == 1024:
             xyz, cluster_feat = self.radar_backbone(xyz=points[:,:,:3].contiguous(),features=points[:,:,3:].transpose(1,2).contiguous())
@@ -61,11 +59,8 @@ class FusionGraphormer(torch.nn.Module):
         local_pos_emb = self.local_embedding(embeddings)
         point_feat = point_feat.view(points.shape[0],1,2048) + global_pos_emb
         cluster_feat += local_pos_emb
-        if calib_emb is not None:
-            calib_embbedings = self.calib_embedding(calib_emb).unsqueeze(1)
-            cluster_feat += calib_embbedings
             
-        return point_feat, cluster_feat
+        return point_feat, cluster_feat, xyz
     
     def forward(self, args, data_dict, smpl, mesh_sampler, meta_masks=None, is_train=False):
         batch_size = data_dict['joints_3d'].shape[0]
@@ -132,14 +127,13 @@ class FusionGraphormer(torch.nn.Module):
         # extract global and local features
         for i, input in enumerate(['radar','master_image','master_depth','sub_image','sub_depth']):
             if data_dict[input].shape[1]:
-                calib_emb = data_dict['trans_mat'][input] if args.calib_emb else None
                 if i == 1 or i == 3:
-                    gloabl_feat, local_feat = self.process_image(data_dict[input], pos_emb=i, calib_emb=calib_emb)
+                    gloabl_feat, local_feat = self.process_image(data_dict[input], pos_emb=i)
                 else:
-                    gloabl_feat, local_feat = self.process_point(data_dict[input], pos_emb=i, calib_emb=calib_emb)
+                    gloabl_feat, local_feat, xyz = self.process_point(data_dict[input], pos_emb=i)
+                    cluster_centers[input] = xyz
                 global_feats.append(gloabl_feat)
                 local_feats.append(local_feat)
-                cluster_centers[input] = local_feat[:,:,:3]
                 
         if is_train and args.shuffle_inputs:
             # shuffle global and local features

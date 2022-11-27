@@ -386,7 +386,7 @@ class ImmDataset(MeshTSVDataset):
                         seq_loader = pickle.load(f)[self.skip_head:-self.skip_tail-1]
                 else:
                     # init result loader, reindex
-                    seq_loader = Sequence_Loader(path, self.skip_head, self.skip_tail)
+                    seq_loader = SequenceLoader(path, self.skip_head, self.skip_tail)
                     if self.create_pkl:
                         p = Process(target=self.write_pkl, args=(path, seq_pkl, seq_loader))
                         p.start()
@@ -601,7 +601,7 @@ class DepthBodyDataset(ImmDataset):
         source = ['depth_pcl', 'image', 'mesh']
         for path in self.seq_paths:
             # init result loader, reindex
-            seq_loader = Sequence_Loader(path, self.skip_head, self.skip_tail, enabled_source=source)
+            seq_loader = SequenceLoader(path, self.skip_head, self.skip_tail, enabled_source=source)
             self.full_data.update({path:seq_loader})
             self.index_map.append(self.index_map[-1] + len(seq_loader))
             

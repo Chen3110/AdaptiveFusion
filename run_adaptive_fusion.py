@@ -12,7 +12,7 @@ import gc
 import numpy as np
 import cv2
 from openpyxl import load_workbook, Workbook
-from src.datasets.utils import crop_image, project_pcl
+from src.datasets.utils import copy2cpu, crop_image, project_pcl, trans_mat_2_dict
 
 from src.modeling.bert import BertConfig, Graphormer
 import src.modeling.model as Models
@@ -36,10 +36,6 @@ from azureml.core.run import Run
 from src.utils.dingtalk import TimerBot
 
 aml_run = Run.get_context()
-
-def c2c(tensor):
-    if isinstance(tensor, np.ndarray): return tensor
-    return tensor.detach().cpu().numpy()
 
 def save_checkpoint(model, args, epoch, iteration, num_trial=10):
     checkpoint_dir = op.join(args.output_dir, 'checkpoint',
@@ -133,9 +129,9 @@ def rectify_pose(pose):
     return pose
 
 def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pred_verts_sub2, gt_pelvis, idx):
-    for k, v in cluster_centers.items():
-        cluster_centers[k] = c2c(v)
-        
+    trans_mat = {}
+    for k, v in data_dict['trans_mat'].items():
+        trans_mat[k] = trans_mat_2_dict(v[idx])
     heads_num, vertex_num, _ = attention.shape
     all_head = np.zeros((vertex_num, vertex_num))
     # compute avg attention for all attention heads
@@ -164,17 +160,20 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
             verts_to_show.append(pred_verts_sub2[i])
             verts_lines.append([0, len(verts_to_show)-1])
             verts_line_colors.append(1 + thres - norm_attention_to_show[i] * np.asarray((200, 208, 255)) / 255)
-    
-    orig_master_img = data_dict['orig_imgs']['master_image']
-    
+
     def draw_pcl_att_map(pcl_input):
+        if pcl_input is 'radar':
+            cam = 'master'
+            image = 'master_image'
+        else:
+            cam = pcl_input[:-6]
+            image = '{}_image'.format(cam)
         # project points to the image
-        pcl_2d = project_pcl(data_dict[pcl_input][idx] + gt_pelvis)
-        pcl_2d = np.floor(pcl_2d).astype(int)
+        orig_img = data_dict['orig_img'][image][idx]
+        pcl_2d = project_pcl(data_dict[pcl_input][idx][:,:3] + gt_pelvis, trans_mat[pcl_input], cam=cam)
         # project cluster centers to the image
-        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis)
-        center_2d = np.floor(center_2d).astype(int)
-        blank = np.zeros_like(orig_master_img[:,:,:1])
+        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis, trans_mat[pcl_input], cam=cam)
+        blank = np.zeros_like(orig_img[:,:,:1])
         start_idx = 655 + 49 * args.inputs.index(pcl_input)
         # sort the weight
         weight_sorted_idx = np.argsort(norm_attention_to_show[[i+start_idx for i in range(center_2d.shape[0])]])
@@ -182,28 +181,28 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
             cv2.circle(blank, (center_2d[i, 1], center_2d[i, 0]), 60, norm_attention_to_show[i+start_idx]*255, -1)
         # apply jet color map
         blank = cv2.applyColorMap(blank, 2)
-        img_with_cluster = cv2.addWeighted(orig_master_img, 0.2, blank, 0.5, 1)
+        img_with_cluster = cv2.addWeighted(orig_img, 0.2, blank, 0.5, 1)
         # plot cluster centers in the image
         for i in range(-1, 2):
             for j in range(-1, 2):
                 img_with_cluster[pcl_2d[:,0]+i, pcl_2d[:,1]+j] = [0, 255, 0]
         # crop the image area of people
-        img_with_cluster = crop_image(pred_joints+gt_pelvis, img_with_cluster, margin=0.3, square=True)
+        img_with_cluster = crop_image(pred_joints+gt_pelvis, img_with_cluster, trans_mat[image], margin=0.3, square=True, cam=cam)
         img_with_cluster = cv2.resize(img_with_cluster, (224, 224))
         return img_with_cluster
     
     def draw_img_att_map(img_input):
         # crop the image area of people
-        croped_img = crop_image(joints=pred_joints+gt_pelvis, image=data_dict[img_input][idx], 
-                                trans_mat=data_dict['trans_mat'][img_input], margin=0.3, square=True, cam=img_input[:-6])
+        croped_img = crop_image(joints=pred_joints+gt_pelvis, image=data_dict['orig_img'][img_input][idx], 
+                                trans_mat=trans_mat[img_input], margin=0.3, square=True, cam=img_input[:-6])
         croped_img = cv2.resize(croped_img, (224, 224))
-        grid_width = croped_img.shape[0]//7
-        blank = np.zeros_like(croped_img[:,:,:1])
+        grid_width = 224 // 7
+        blank = np.zeros((224, 224, 1), dtype=np.uint8)
         start_idx = 655 + 49 * args.inputs.index(img_input)
         # plot grid
         for i in range(7):
             for j in range(7):
-                cv2.rectangle(blank,(i*grid_width,j*grid_width),((i+1)*grid_width,(j+1)*grid_width),
+                cv2.rectangle(blank, (i*grid_width,j*grid_width), ((i+1)*grid_width,(j+1)*grid_width), 
                             norm_attention_to_show[i*7+j+start_idx]*255, -1)
         # apply jet color map
         blank = cv2.applyColorMap(blank, 2)
@@ -224,7 +223,7 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
     heatmap = np.hstack(img_to_show)
     cv2.imwrite('heatmap.png', heatmap)
     cv2.namedWindow('heatmap', 0)
-    cv2.resizeWindow("heatmap", 640, 480)
+    cv2.resizeWindow("heatmap", 1280, 480)
     cv2.imshow('heatmap', heatmap)
     cv2.waitKey(1)
 
@@ -310,8 +309,6 @@ def run(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sample
         
         for m in args.inputs:
             data_dict[m] = data_dict[m].cuda(args.device)
-        for k, v in data_dict['trans_mat'].items():
-            data_dict['trans_mat'][k] = v.cuda(args.device)
 
         # prepare masks for mask vertex/joint modeling
         joint_mask_ = joint_mask.expand(-1,-1,2051)
@@ -424,34 +421,40 @@ def run_eval_general(args, val_dataloader, fusion_model, smpl, mesh_sampler):
 def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attention=None, 
                      cluster_centers=None, pred_verts_sub2=None, pred_joints=None, gt_pelvis=None):
     for k, v in data_dict.items():
-        data_dict[k] = c2c(v)
+        if isinstance(v, torch.Tensor):
+            data_dict[k] = copy2cpu(v)
     for i in range(len(pred_vertices)):
-        print('frame_id:', i)
-        res = dict(
-            radar_mesh = dict(
-                mesh = pcl2box(data_dict['radar'][i][:,:3]) if data_dict['radar'].shape[1] else None,
-                color = [0,0.8,0],
-            ),
-            master_mesh = dict(
-                mesh = pcl2box(data_dict['master_depth'][i][:,:3]) if data_dict['master_depth'].shape[1] else None,
-                color = [0.8,0,0],
-            ),
-            sub_mesh = dict(
-                mesh = pcl2box(data_dict['sub_depth'][i][:,:3]) if data_dict['sub_depth'].shape[1] else None,
-                color = [0,0,0.8],
-            ),
-            pred_smpl = dict(
-                mesh = [c2c(pred_vertices)[i], c2c(face)],
-                color = np.asarray([179, 230, 213]) /255
-                # 179, 230, 213
-            ),
-            label_smpl = dict(
-                mesh = [c2c(gt_vertices)[i], c2c(face)],
-                color = np.asarray([235, 189, 191]) / 255,
-            ),
-        )
-        if args.show_att:
-            res = show_att_weight(args, data_dict, cluster_centers, c2c(attention)[i], c2c(pred_joints)[i], c2c(pred_verts_sub2)[i], c2c(gt_pelvis)[i], i)
+        if not args.show_att:
+        # print('frame_id:', i)
+            res = dict(
+                radar_mesh = dict(
+                    mesh = pcl2box(data_dict['radar'][i][:,:3]) if data_dict['radar'].shape[1] else None,
+                    color = [0,0.8,0],
+                ),
+                master_mesh = dict(
+                    mesh = pcl2box(data_dict['master_depth'][i][:,:3]) if data_dict['master_depth'].shape[1] else None,
+                    color = [0.8,0,0],
+                ),
+                sub_mesh = dict(
+                    mesh = pcl2box(data_dict['sub_depth'][i][:,:3]) if data_dict['sub_depth'].shape[1] else None,
+                    color = [0,0,0.8],
+                ),
+                pred_smpl = dict(
+                    mesh = [copy2cpu(pred_vertices)[i], copy2cpu(face)],
+                    color = np.asarray([179, 230, 213]) /255
+                    # 179, 230, 213
+                ),
+                label_smpl = dict(
+                    mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
+                    color = np.asarray([235, 189, 191]) / 255,
+                ),
+            )
+        else:
+            for k, v in cluster_centers.items():
+                cluster_centers[k] = copy2cpu(v)
+            for k, v in data_dict['orig_img'].items():
+                data_dict['orig_img'].update({k: copy2cpu(v)})
+            res = show_att_weight(args, data_dict, cluster_centers, copy2cpu(attention)[i], copy2cpu(pred_joints)[i], copy2cpu(pred_verts_sub2)[i], copy2cpu(gt_pelvis)[i], i)
         O3DStreamPlot.pause = args.pause_at_start
         yield res
 
@@ -496,8 +499,6 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                     
             for m in args.inputs:
                 data_dict[m] = data_dict[m].cuda(args.device)
-            for k, v in data_dict['trans_mat'].items():
-                data_dict['trans_mat'][k] = v.cuda(args.device)
                 
             # forward-pass
             pred_dict, pred_3d_joints, pred_verts_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
@@ -556,8 +557,8 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
         output_path = os.path.join(args.output_dir, 'error', args.test_scene)
         if not os.path.isdir(output_path):
             os.makedirs(output_path)
-        j_err = c2c(torch.vstack(per_joint_err))
-        v_err = c2c(torch.vstack(per_vertex_err))
+        j_err = copy2cpu(torch.vstack(per_joint_err))
+        v_err = copy2cpu(torch.vstack(per_vertex_err))
         np.save(os.path.join(output_path, "per_joint_err"), j_err)
         np.save(os.path.join(output_path, "per_vertex_err"), v_err)
         print("mean joint err (cm):", np.mean(j_err)*100)
@@ -570,6 +571,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             f.write("\nmax joint error: " + str(np.mean(np.max(j_err, axis=1), axis=0)*100))
             f.write("\nmax vertex error: " + str(np.mean(np.max(v_err, axis=1), axis=0)*100))
 
+        # write errors to the excel
         sheet_loc_dict = {
             'lab1': ['A1', 'B1', 'A2', 'B2'],
             'lab2': ['C1', 'D1', 'C2', 'D2'],
@@ -824,7 +826,7 @@ def parse_args():
     #########################################################
     parser.add_argument('-a', '--arch', default='hrnet-w64',
                     help='CNN backbone architecture: hrnet-w64, hrnet, resnet50')
-    parser.add_argument("--model", default='FusionGraphormer', type=str,
+    parser.add_argument("--model", default='AdaptiveFusion', type=str,
                         help='Choose the model')
     parser.add_argument("--num_hidden_layers", default=4, type=int, required=False, 
                         help="Update model config if given")

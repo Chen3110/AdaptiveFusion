@@ -33,7 +33,7 @@ class FusionDataset():
         self.full_data = {}
         for path in self.seq_paths:
             # init result loader, reindex
-            seq_loader = Sequence_Loader(path, self.args.skip_head, self.args.skip_tail, resource=self.resource)
+            seq_loader = SequenceLoader(path, self.args.skip_head, self.args.skip_tail, resource=self.resource)
             self.full_data.update({path:seq_loader})
             self.index_map.append(self.index_map[-1] + len(seq_loader))
             
@@ -43,26 +43,19 @@ class FusionDataset():
                 frame_idx = global_idx - self.index_map[seq_idx]
                 return seq_idx, frame_idx
         raise IndexError
-        
-    def mosh_pose_transform(self, trans, root_orient, root_joint, trans_mat):
-        mosh_offset = root_joint - trans
-        new_trans = trans_mat['R'] @ (trans + mosh_offset) + trans_mat['t'] - mosh_offset
-        orient_mat = trans_mat['R'] @ cv2.Rodrigues(root_orient)[0]
-        new_orient = cv2.Rodrigues(orient_mat)[0]
-        return new_trans, new_orient
     
-    def process_image(self, image, joints=None, need_crop=False):
+    def process_image(self, image, joints=None, trans_mat=None, need_crop=False):
         if need_crop:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             # crop person area using joints
-            image = crop_image(joints, image, square=True)
+            image = crop_image(joints, image, trans_mat, square=True)
             image = cv2.resize(image, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
         image = np.transpose(image.astype('float32'), (2,0,1))/255.0
         image = torch.from_numpy(image).float()
         transformed_img = self.normalize_img(image)
         return transformed_img
     
-    def process_pcl(self, pcl, joints, trans_mat, padding_points=1024, mask=False):
+    def process_pcl(self, pcl, joints, padding_points=1024, mask=False):
         # filter person pcl using joints
         pcl = filter_pcl(joints, pcl)
         if not pcl.shape[0]:
@@ -71,9 +64,6 @@ class FusionDataset():
             # mask points
             indices = np.random.choice(pcl.shape[0], 100)
             pcl = pcl[indices]
-        if trans_mat is not None:
-            trans_pcl = (pcl[:,:3] - trans_mat['t']) @ trans_mat['R']
-            pcl = np.hstack((trans_pcl, pcl[:,3:]))
         # normalize pcl
         pcl[:,:3] -= joints[0]
         # padding pcl
@@ -96,7 +86,6 @@ class FusionDataset():
         mesh = dict(frame['mesh'])
         pose = mesh['pose']
         betas = mesh['shape']
-        gender = 'None'
         joints = mesh['joints'][:22]
         orig_imgs = {}
         if self.args.show_att:
@@ -107,41 +96,22 @@ class FusionDataset():
         mas_img = torch.Tensor([])
         trans_mat_mas = seq_loader.calib['kinect_master']
         if 'master_image' in self.args.inputs:
-            joints_mas = (joints - trans_mat_mas['t']) @ trans_mat_mas['R']
-            mas_img = self.process_image(frame['master_image'], joints_mas, self.args.show_att)
+            mas_img = self.process_image(frame['master_image'], joints, trans_mat_mas, self.args.show_att)
 
         sub_img = torch.Tensor([])
         trans_mat_sub = seq_loader.calib['kinect_sub']
         if 'sub_image' in self.args.inputs:
-            joints_sub = (joints - trans_mat_sub['t']) @ trans_mat_sub['R']
-            sub_img = self.process_image(frame['sub_image'], joints_sub, self.args.show_att)
-                
-        # transform mesh param and joints to the kinect coordinate if need
-        trans_joints = joints
-        trans_pose = pose
-        trans_mat_to_cam = None
-        if self.args.trans_coor_to_cam:
-            if 'master_image' in self.args.inputs:
-                trans_mat_to_cam = trans_mat_mas
-                trans_joints = joints_mas
-            elif 'sub_image' in self.args.inputs:
-                trans_mat_to_cam = trans_mat_sub
-                trans_joints = joints_sub
-            else:
-                raise RuntimeError("Kinect image must in inputs.")
-            rev_trans_mat = {'R':np.asarray(trans_mat_to_cam['R']).T, 't':-np.asarray(trans_mat_to_cam['R']).T @ trans_mat_to_cam['t']}
-            trans, root_orient = self.mosh_pose_transform(pose[:3], pose[3:6], joints[0], rev_trans_mat)
-            trans_pose = np.hstack((trans, root_orient.reshape(-1), pose[6:]))
-                
+            sub_img = self.process_image(frame['sub_image'], joints, trans_mat_sub, self.args.show_att)
+        
         # get 3d joints center
-        joint_center = ((trans_joints.max(axis=0) + trans_joints.min(axis=0))/2)[:3]
+        joint_center = ((joints.max(axis=0) + joints.min(axis=0))/2)[:3]
         
         # process radar pcl
         radar_pcl = torch.Tensor([])
         if 'radar' in self.args.inputs:
             radar_pcl = frame['radar']
             radar_pcl[:,3:] /= np.array([5e-38, 5., 150.])
-            radar_pcl = self.process_pcl(radar_pcl, joints, trans_mat_to_cam, padding_points=1024)
+            radar_pcl = self.process_pcl(radar_pcl, joints, padding_points=1024)
             
         # process depth pcl
         if self.args.train:
@@ -151,44 +121,45 @@ class FusionDataset():
             mask = False
         mas_depth = torch.Tensor([])
         if 'master_depth' in self.args.inputs:
-            mas_depth = frame['master_depth']
-            mas_depth = self.process_pcl(mas_depth, joints, trans_mat_to_cam, padding_points=4096, mask=mask)
+            mas_depth = self.process_pcl(frame['master_depth'], joints, padding_points=4096, mask=mask)
         
         sub_depth = torch.Tensor([])
         if 'sub_depth' in self.args.inputs:
-            sub_depth = frame['sub_depth']
-            sub_depth = self.process_pcl(sub_depth, joints, trans_mat_to_cam, padding_points=4096, mask=mask)
+            sub_depth = self.process_pcl(frame['sub_depth'], joints, padding_points=4096, mask=mask)
             
         # masking tokens
         joint_mask = self.gen_mask(num_mask=22, mask_ratio=0.3).unsqueeze(-1)
         vert_mask = self.gen_mask(num_mask=655, mask_ratio=0.3).unsqueeze(-1)
+                
+        # transform matrix
+        trans_mat_mas = torch.tensor(trans_mat_2_tensor(trans_mat_mas)).float()
+        trans_mat_sub = torch.tensor(trans_mat_2_tensor(trans_mat_sub)).float()
         trans_mat = {
-            'radar': torch.tensor([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]).float(),
-            'master_image': torch.from_numpy(np.vstack([trans_mat_mas['R'], trans_mat_mas['t']]).reshape(-1)).float(),
-            'master_depth': torch.from_numpy(np.vstack([trans_mat_mas['R'], trans_mat_mas['t']]).reshape(-1)).float(),
-            'sub_image': torch.from_numpy(np.vstack([trans_mat_sub['R'], trans_mat_sub['t']]).reshape(-1)).float(),
-            'sub_depth': torch.from_numpy(np.vstack([trans_mat_sub['R'], trans_mat_sub['t']]).reshape(-1)).float(),
+            'radar': torch.tensor([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]).float(),
+            'master_image': trans_mat_mas,
+            'master_depth': trans_mat_mas,
+            'sub_image': trans_mat_sub,
+            'sub_depth': trans_mat_sub,
         }
         
         # return result
         result = {}
-        result['pose'] = torch.from_numpy(trans_pose).float()
+        result['pose'] = torch.from_numpy(pose).float()
         result['betas'] = torch.from_numpy(betas).float()
-        result['joints_3d'] = torch.from_numpy(trans_joints).float()
-        result['root_pelvis'] = torch.from_numpy(trans_joints[0]).float()
+        result['joints_3d'] = torch.from_numpy(joints).float()
+        result['root_pelvis'] = torch.from_numpy(joints[0]).float()
 
         result['joint_mask'] = joint_mask
         result['vert_mask'] = vert_mask
 
         result['center'] = np.asarray(joint_center).astype(np.float32)
-        result['gender'] = gender
         result['radar'] = radar_pcl
         result['master_image'] = mas_img
         result['sub_image'] = sub_img
         result['master_depth'] = mas_depth
         result['sub_depth'] = sub_depth
         result['trans_mat'] = trans_mat
-        result['orig_imgs'] = orig_imgs
+        result['orig_img'] = orig_imgs
         
         return result
 
