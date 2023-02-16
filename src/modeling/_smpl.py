@@ -219,9 +219,9 @@ def get_graph_params(filename, nsize=1):
     return A, U, D
 
 
-SMPLX_MODEL_FEMALE_PATH = '/home/nesc525/chen/3DSVC/ignoredata/mosh_files/smplx/female/model.npz'
-SMPLX_MODEL_MALE_PATH = '/home/nesc525/chen/3DSVC/ignoredata/mosh_files/smplx/male/model.npz'
-SMPLX_MODEL_NEUTRAL_PATH = '/home/nesc525/chen/3DSVC/ignoredata/mosh_files/smplx/neutral/model.npz'
+SMPLX_MODEL_FEMALE_PATH = 'models/smplx/female/model.npz'
+SMPLX_MODEL_MALE_PATH = 'models/smplx/male/model.npz'
+SMPLX_MODEL_NEUTRAL_PATH = 'models/smplx/neutral/model.npz'
 
 class SMPLXModel(BodyModel):
     def __init__(self, device=None, **kwargs):

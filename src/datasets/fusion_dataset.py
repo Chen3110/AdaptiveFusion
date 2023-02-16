@@ -25,6 +25,7 @@ class FusionDataset():
             self.seq_paths = [op.join(self.data_path, p) for p in seq_dirs]
         else:
             seq_dirs = ['sequence_{}'.format(i) for i in range(2)]
+            # seq_dirs = ['sequence_1']
             self.seq_paths = [op.join(self.data_path, self.args.test_scene, p) for p in seq_dirs]
         
         print('Data path: ', self.seq_paths)
@@ -116,7 +117,7 @@ class FusionDataset():
         # process depth pcl
         if self.args.train:
             random_value = np.random.rand()
-            mask = True if random_value >= 0.7 else False
+            mask = True if random_value < self.args.mask_ratio else False
         else:
             mask = False
         mas_depth = torch.Tensor([])
@@ -128,8 +129,8 @@ class FusionDataset():
             sub_depth = self.process_pcl(frame['sub_depth'], joints, padding_points=4096, mask=mask)
             
         # masking tokens
-        joint_mask = self.gen_mask(num_mask=22, mask_ratio=0.3).unsqueeze(-1)
-        vert_mask = self.gen_mask(num_mask=655, mask_ratio=0.3).unsqueeze(-1)
+        joint_mask = self.gen_mask(num_mask=22, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
+        vert_mask = self.gen_mask(num_mask=655, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
                 
         # transform matrix
         trans_mat_mas = torch.tensor(trans_mat_2_tensor(trans_mat_mas)).float()

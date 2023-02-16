@@ -479,9 +479,9 @@ class ImmDataset(MeshTSVDataset):
 
         # Process image
         # img = self.rgb_processing(img, center, sc*scale, rot, flip, pn)
-        img = crop_image(trans_joints, orig_img, square=True)
-        img = cv2.resize(img, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
-        img = np.transpose(img.astype('float32'),(2,0,1))/255.0
+        # img = crop_image(trans_joints, orig_img, square=True)
+        # img = cv2.resize(img, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
+        img = np.transpose(orig_img.astype('float32'),(2,0,1))/255.0
         img = torch.from_numpy(img).float()
         # Store image before normalization to use it in visualization
         transformed_img = self.normalize_img(img)

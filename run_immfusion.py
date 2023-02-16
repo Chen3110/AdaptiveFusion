@@ -499,7 +499,7 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
                 att = pred_dict.get('attention', [0])[-1]
                 seed_points = pred_dict.get('seed_points', None)
                 gen = res_generator(pcls[:,:,:3], pred_vertices, gt_vertices, smpl.f, pred_vertices_sub2, pred_3d_joints, 
-                                    att, seed_points, args.joint_id, annotations['orig_img'], gt_3d_pelvis, args.show_att, pause_at_start=True)
+                                    att, seed_points, args.joint_id, annotations['orig_img'], gt_3d_pelvis, args.show_att, pause_at_start=False)
                 batch += 1
                 if batch > args.max_num_batch:
                     return 0, 0, 0, 0
@@ -896,6 +896,11 @@ def main(args):
         train_size = int(0.9 * len(dataset))
         eval_size = len(dataset) - train_size
         dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
+        if args.limit_dataset:
+            train_size = int(len(dataset)/32)
+            eval_size = int(len(dataset)/10)
+            test_size = len(dataset) - train_size - eval_size
+            dataset_train, dataset_eval, _ = torch.utils.data.random_split(dataset, [train_size, eval_size, test_size])
         train_dataloader = make_data_loader(args, dataset_train, args.distributed, is_train=True, 
                                             scale_factor=args.img_scale_factor)
         val_dataloader = make_data_loader(args, dataset_eval, args.distributed, is_train=False, 
@@ -913,7 +918,7 @@ def parse_args():
     #########################################################
     # Data related arguments
     #########################################################
-    parser.add_argument("--data_path", default='/home/nesc525/drivers/0/dataset', type=str, required=False,
+    parser.add_argument("--data_path", default='/home/nesc525/drivers/6/dataset', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
     parser.add_argument("--train_yaml", default='Tax-H36m-coco40k-Muco-UP-Mpii/train.yaml', type=str, required=False,
                         help="Yaml file with all data for training.")
@@ -1015,6 +1020,7 @@ def parse_args():
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
     parser.add_argument('--max_position_embeddings', type=int, default=800)
+    parser.add_argument('--limit_dataset', action="store_true")
 
     args = parser.parse_args()
     return args

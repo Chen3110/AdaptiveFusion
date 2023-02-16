@@ -251,6 +251,10 @@ class EvaluateStreamPlot(O3DStreamPlot):
 
             o3d.io.write_triangle_mesh(os.path.join(save_path, "radar_pcl{}.ply".format(
                 self.idx)), EvaluateStreamPlot.updater_dict["radar_mesh"].update_item)
+            o3d.io.write_triangle_mesh(os.path.join(save_path, "master_pcl{}.ply".format(
+                self.idx)), EvaluateStreamPlot.updater_dict["master_mesh"].update_item)
+            o3d.io.write_triangle_mesh(os.path.join(save_path, "sub_pcl{}.ply".format(
+                self.idx)), EvaluateStreamPlot.updater_dict["sub_mesh"].update_item)
             o3d.io.write_triangle_mesh(os.path.join(save_path, "pred_smpl{}.ply".format(
                 self.idx)), EvaluateStreamPlot.updater_dict["pred_smpl"].update_item)
             o3d.io.write_triangle_mesh(os.path.join(save_path, "label_smpl{}.ply".format(
@@ -282,7 +286,7 @@ class EvaluateStreamPlot(O3DStreamPlot):
         #     mat.line_width = 10  # note that this is scaled with respect to pixels,
         
         super().init_show()
-        self.ctr.set_up(np.array([[0], [-1], [0]]))
-        self.ctr.set_front(np.array([[0], [0], [-1]]))
+        self.ctr.set_up(np.array([[0], [0], [1]]))
+        self.ctr.set_front(np.array([[0], [-1], [0]]))
         self.ctr.set_lookat(np.array([0, 0, 0]))
         self.ctr.set_zoom(1)

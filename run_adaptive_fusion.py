@@ -170,9 +170,9 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
             image = '{}_image'.format(cam)
         # project points to the image
         orig_img = data_dict['orig_img'][image][idx]
-        pcl_2d = project_pcl(data_dict[pcl_input][idx][:,:3] + gt_pelvis, trans_mat[pcl_input], cam=cam)
+        pcl_2d = project_pcl(data_dict[pcl_input][idx][:,:3] + gt_pelvis, trans_mat[image], cam=cam)
         # project cluster centers to the image
-        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis, trans_mat[pcl_input], cam=cam)
+        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis, trans_mat[image], cam=cam)
         blank = np.zeros_like(orig_img[:,:,:1])
         start_idx = 655 + 49 * args.inputs.index(pcl_input)
         # sort the weight
@@ -210,16 +210,16 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
         return img_with_grid
     
     img_to_show = []
-    # draw point attention map
-    for pcl_input in ['radar', 'master_depth', 'sub_depth']:
-        if pcl_input in args.inputs:
-            img_to_show.append(draw_pcl_att_map(pcl_input))
-
     # draw image attention map
     for img_input in ['master_image', 'sub_image']:
         if img_input in args.inputs:
             img_to_show.append(draw_img_att_map(img_input))
     
+    # draw point attention map
+    for pcl_input in ['master_depth', 'sub_depth', 'radar']:
+        if pcl_input in args.inputs:
+            img_to_show.append(draw_pcl_att_map(pcl_input))
+            
     heatmap = np.hstack(img_to_show)
     cv2.imwrite('heatmap.png', heatmap)
     cv2.namedWindow('heatmap', 0)
@@ -234,7 +234,7 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
 
     return res
 
-def run(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sampler, start_epoch):
+def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sampler, start_epoch):
     smpl.eval()
     max_iter = len(train_dataloader)
     iters_per_epoch = max_iter // args.num_train_epochs
@@ -424,30 +424,32 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
         if isinstance(v, torch.Tensor):
             data_dict[k] = copy2cpu(v)
     for i in range(len(pred_vertices)):
+        print('frame_id:', i)
         if not args.show_att:
-        # print('frame_id:', i)
             res = dict(
-                radar_mesh = dict(
-                    mesh = pcl2box(data_dict['radar'][i][:,:3]) if data_dict['radar'].shape[1] else None,
+                radar_pcl = dict(
+                    # mesh = pcl2box(data_dict['radar'][i][:,:3]) if data_dict['radar'].shape[1] else None,
+                    pcl = data_dict['radar'][i][:,:3] if data_dict['radar'].shape[1] else None,
                     color = [0,0.8,0],
                 ),
-                master_mesh = dict(
-                    mesh = pcl2box(data_dict['master_depth'][i][:,:3]) if data_dict['master_depth'].shape[1] else None,
-                    color = [0.8,0,0],
+                master_pcl = dict(
+                    # mesh = pcl2box(data_dict['master_depth'][i][:,:3]) if data_dict['master_depth'].shape[1] else None,
+                    pcl = data_dict['master_depth'][i][:,:3] if data_dict['master_depth'].shape[1] else None,
+                    color = np.asarray([59, 170, 235]) /255,
                 ),
-                sub_mesh = dict(
-                    mesh = pcl2box(data_dict['sub_depth'][i][:,:3]) if data_dict['sub_depth'].shape[1] else None,
-                    color = [0,0,0.8],
+                sub_pcl = dict(
+                    # mesh = pcl2box(data_dict['sub_depth'][i][:,:3]) if data_dict['sub_depth'].shape[1] else None,
+                    pcl = data_dict['sub_depth'][i][:,:3] if data_dict['sub_depth'].shape[1] else None,
+                    color = np.asarray([245, 157, 86]) /255,
                 ),
                 pred_smpl = dict(
                     mesh = [copy2cpu(pred_vertices)[i], copy2cpu(face)],
                     color = np.asarray([179, 230, 213]) /255
-                    # 179, 230, 213
                 ),
-                label_smpl = dict(
-                    mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
-                    color = np.asarray([235, 189, 191]) / 255,
-                ),
+                # label_smpl = dict(
+                #     mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
+                #     color = np.asarray([235, 189, 191]) / 255,
+                # ),
             )
         else:
             for k, v in cluster_centers.items():
@@ -536,6 +538,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                     print('batch_id:', i)
                     plot.show(gen, save_path=snapshot_path)
                 else:
+                    print('batch_id:', i)
                     plot.show(gen)
 
     if loss_manager is not None:
@@ -711,14 +714,14 @@ def main(args):
         backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
         
-        radar_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
+        radar_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
         depth_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=64, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
         
         backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
 
         # build end-to-end Graphormer network (backbone + multi-layer graphormer encoder)
         Model = getattr(Models, args.model)
-        _model = Model(backbone, trans_encoder)
+        _model = Model(args, backbone, trans_encoder)
 
         start_epoch = 0
         if args.resume_checkpoint!=None and args.resume_checkpoint!='None':
@@ -755,14 +758,14 @@ def main(args):
     if args.train==True:
         train_size = int(0.9 * len(dataset))
         if args.radar_only or args.image_only or args.depth_only:
-            train_size = int(0.05 * len(dataset))
+            train_size = int(len(dataset)/32)
         eval_size = len(dataset) - train_size
         dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
         train_dataloader = make_data_loader(args, dataset_train, args.distributed, is_train=True, 
                                             scale_factor=args.img_scale_factor)
         val_dataloader = make_data_loader(args, dataset_eval, args.distributed, is_train=False, 
                                             scale_factor=args.img_scale_factor)
-        run(args, train_dataloader, val_dataloader, _model, smpl, mesh_sampler, start_epoch)
+        run_train(args, train_dataloader, val_dataloader, _model, smpl, mesh_sampler, start_epoch)
         
     else:
         val_dataloader = make_data_loader(args, dataset, args.distributed, is_train=False, scale_factor=args.img_scale_factor)
@@ -864,8 +867,7 @@ def parse_args():
     parser.add_argument('--max_num_batch', type=int, default=10000)
     parser.add_argument('--save_snapshot', action="store_true")
     parser.add_argument('--output_dim', type=int, default=3)
-    parser.add_argument('--image_mask_ratio', type=float, default=0.3)
-    parser.add_argument('--point_mask_ratio', type=float, default=0.3)
+    parser.add_argument('--mask_ratio', type=float, default=0.3)
     parser.add_argument('--points_w_image_feat', action="store_true")
     parser.add_argument('--radar_only', action="store_true")
     parser.add_argument('--image_only', action="store_true")
@@ -878,6 +880,7 @@ def parse_args():
     parser.add_argument('--single_input_ratio', type=float, default=0.)
     parser.add_argument('--calib_emb', action="store_true")
     parser.add_argument('--shuffle_inputs', action="store_true")
+    parser.add_argument('--num_clusters', type=int, default=49)
 
     args = parser.parse_args()
     return args
