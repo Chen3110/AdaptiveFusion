@@ -142,15 +142,15 @@ class GraphormerLayer(nn.Module):
             if self.mesh_type == 'body':
                 joints = attention_output[:,0:22,:] 
                 vertices = attention_output[:,22:677,:]
-                img_tokens = attention_output[:,677:,:]
+                modal_tokens = attention_output[:,677:,:]
 
             elif self.mesh_type == 'hand':
                 joints = attention_output[:,0:21,:]
                 vertices = attention_output[:,21:-49,:]
-                img_tokens = attention_output[:,-49:,:]
+                modal_tokens = attention_output[:,-49:,:]
 
             vertices = self.graph_conv(vertices)
-            joints_vertices = torch.cat([joints,vertices,img_tokens],dim=1)
+            joints_vertices = torch.cat([joints,vertices,modal_tokens],dim=1)
         else:
             joints_vertices = attention_output
 

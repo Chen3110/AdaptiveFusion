@@ -109,7 +109,7 @@ class Graphormer_Body_Network(torch.nn.Module):
             return cam_param, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 
 
-class FusionGraphormer(Graphormer_Body_Network):
+class ImmFusion(Graphormer_Body_Network):
     '''
     End-to-end Graphormer network for human pose and mesh reconstruction from a single image.
     '''

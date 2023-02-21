@@ -56,18 +56,6 @@ def save_checkpoint(model, args, epoch, iteration, num_trial=10):
     else:
         logger.info("Failed to save checkpoint after {} trails.".format(num_trial))
 
-def save_scores(args, split, mpjpe, pampjpe, mpve):
-    eval_log = []
-    res = {}
-    res['mPJPE'] = mpjpe
-    res['PAmPJPE'] = pampjpe
-    res['mPVE'] = mpve
-    eval_log.append(res)
-    with open(op.join(args.output_dir, split+'_eval_logs.json'), 'w') as f:
-        json.dump(eval_log, f)
-    logger.info("Save eval scores to {}".format(args.output_dir))
-    return
-
 def adjust_learning_rate(optimizer, epoch, args):
     """
     Sets the learning rate to the initial LR decayed by x every y epochs
@@ -119,14 +107,6 @@ def vertices_loss(criterion_vertices, pred_vertices, gt_vertices, device):
         return criterion_vertices(pred_vertices, gt_vertices)
     else:
         return torch.FloatTensor(1).fill_(0.).to(device) 
-    
-def rectify_pose(pose):
-    pose = pose.copy()
-    R_mod = cv2.Rodrigues(np.array([np.pi, 0, 0]))[0]
-    R_root = cv2.Rodrigues(pose[:3])[0]
-    new_root = R_root.dot(R_mod)
-    pose[:3] = cv2.Rodrigues(new_root)[0].reshape(3)
-    return pose
 
 def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pred_verts_sub2, gt_pelvis, idx):
     trans_mat = {}
@@ -327,6 +307,10 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
 
         loss_manager.update_loss("3d_joint_loss", args.joints_loss_weight*loss_3d_joints)
         loss_manager.update_loss("vertex_loss", args.vertices_loss_weight*loss_vertices)
+        
+        if args.model == 'TokenFusion':
+            score_loss = torch.sum(torch.abs(pred_dict.get('pred_score', torch.zeros(1).cuda())))
+            loss_manager.update_loss("score_loss", 1e-3*score_loss)
         
         # we empirically use hyperparameters to balance difference losses
         loss = loss_manager.calculate_total_loss()
@@ -627,6 +611,9 @@ def main(args):
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
     args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth'] if args.train else args.inputs.replace(' ','').split(',')
+    if args.model == 'TokenFusion':
+        args.enabled_inputs = args.inputs
+        args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth']
     if not args.inputs:
         raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
@@ -873,6 +860,7 @@ def parse_args():
     parser.add_argument('--image_only', action="store_true")
     parser.add_argument('--depth_only', action="store_true")
     parser.add_argument('--wo_GIM', action="store_true")
+    parser.add_argument('--wo_MMM', action="store_true")
     parser.add_argument('--wo_local_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)

@@ -95,14 +95,17 @@ class FusionDataset():
             
         # process image
         mas_img = torch.Tensor([])
+        bbox = {}
         trans_mat_mas = seq_loader.calib['kinect_master']
         if 'master_image' in self.args.inputs:
             mas_img = self.process_image(frame['master_image'], joints, trans_mat_mas, self.args.show_att)
+            bbox.update({'master_image':frame['master_bbox'].reshape(-1)})
 
         sub_img = torch.Tensor([])
         trans_mat_sub = seq_loader.calib['kinect_sub']
         if 'sub_image' in self.args.inputs:
             sub_img = self.process_image(frame['sub_image'], joints, trans_mat_sub, self.args.show_att)
+            bbox.update({'sub_image':frame['sub_bbox'].reshape(-1)})
         
         # get 3d joints center
         joint_center = ((joints.max(axis=0) + joints.min(axis=0))/2)[:3]
@@ -161,6 +164,7 @@ class FusionDataset():
         result['sub_depth'] = sub_depth
         result['trans_mat'] = trans_mat
         result['orig_img'] = orig_imgs
+        result['bbox'] = bbox
         
         return result
 

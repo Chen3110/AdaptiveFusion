@@ -964,7 +964,7 @@ def parse_args():
     #########################################################
     parser.add_argument('-a', '--arch', default='hrnet-w64',
                     help='CNN backbone architecture: hrnet-w64, hrnet, resnet50')
-    parser.add_argument("--model", default='mmGraphormer', type=str,
+    parser.add_argument("--model", default='ImmFusion', type=str,
                         help='Choose the model')
     parser.add_argument("--num_hidden_layers", default=4, type=int, required=False, 
                         help="Update model config if given")

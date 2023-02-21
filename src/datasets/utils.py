@@ -39,9 +39,13 @@ class SequenceLoader(object):
         if 'master_image' in self.resource:
             result['master_image'] = cv2.imread(os.path.join(
                 self.seq_path, 'image', 'master', 'frame_{}.png'.format(idx+self.skip_head)))
+            result['master_bbox'] = np.load(os.path.join(
+                self.seq_path, 'bounding_box', 'master', 'frame_{}.npy'.format(idx+self.skip_head)))
         if 'sub_image' in self.resource:
             result['sub_image'] = cv2.imread(os.path.join(
                 self.seq_path, 'image', 'sub', 'frame_{}.png'.format(idx+self.skip_head)))
+            result['sub_bbox'] = np.load(os.path.join(
+                self.seq_path, 'bounding_box', 'sub', 'frame_{}.npy'.format(idx+self.skip_head)))
         if 'master_depth' in self.resource:
             result['master_depth'] = np.load(os.path.join(
                 self.seq_path, 'depth_pcl', 'master', 'frame_{}.npy'.format(idx+self.skip_head)))
@@ -53,10 +57,12 @@ class SequenceLoader(object):
             
         return result
 
+
 def copy2cpu(tensor):
     if isinstance(tensor, np.ndarray):
         return tensor
     return tensor.detach().cpu().numpy()
+
 
 def project_pcl(pcl, trans_mat=None, cam='master', image_size=np.array([1536,2048])):
     if trans_mat is not None:
@@ -68,6 +74,21 @@ def project_pcl(pcl, trans_mat=None, cam='master', image_size=np.array([1536,204
     pcl_2d = np.where(pcl_2d<image_size-1, pcl_2d, image_size-1)
     pcl_2d = np.where(pcl_2d>0, pcl_2d, 0)
     
+    return pcl_2d
+
+
+def project_pcl_torch(pcl, trans_mat=None, cam='master', image_size=torch.tensor([1536,2048])):
+    """
+    Project pcl to the image plane
+    """
+    if trans_mat is not None:
+        pcl = (pcl - trans_mat[:,None,:3,3]) @ trans_mat[:,:3,:3]
+    pcl_2d = ((pcl/pcl[:,:,2:3]) @ torch.from_numpy(INTRINSIC[cam]).T.float().cuda())[:,:,:2]
+    pcl_2d = torch.floor(pcl_2d).long()
+    pcl_2d[:,:,[0,1]] = pcl_2d[:,:,[1,0]]
+    image_size = image_size.cuda()
+    pcl_2d = torch.where(pcl_2d<image_size-1, pcl_2d, image_size-1)
+    pcl_2d = torch.where(pcl_2d>0, pcl_2d, 0)
     return pcl_2d
 
 

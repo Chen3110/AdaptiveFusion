@@ -3,12 +3,50 @@ from torch import nn, einsum
 
 from einops import rearrange
 
+class FFN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            #print(layer, x.shape)
+            x = nn.functional.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x
+    
+class PredictorLG(nn.Module):
+    """ 
+    From DydamicVit
+    """
+    def __init__(self, embed_dim=1024):
+        super().__init__()
+        self.score_nets = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.GELU(),
+            nn.Linear(embed_dim // 2, embed_dim // 4),
+            nn.GELU(),
+            nn.Linear(embed_dim // 4, 2),
+            nn.LogSoftmax(dim=-1)
+        )
+
+    def forward(self, x):
+        x = self.score_nets(x)
+        return x
+    
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
         self.fn = fn
     def forward(self, x, y=None, **kwargs):
-        return self.fn(x, y, **kwargs) + x
+        if y is not None:
+            return self.fn(x, y, **kwargs) + x + y
+        else:
+            return self.fn(x, **kwargs) + x
 
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
@@ -22,7 +60,7 @@ class PreNorm(nn.Module):
             return self.fn(self.norm(x), **kwargs)
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout = 0.):
+    def __init__(self, dim, hidden_dim, dropout = 0., fn=None):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
@@ -31,7 +69,11 @@ class FeedForward(nn.Module):
             nn.Linear(hidden_dim, dim),
             nn.Dropout(dropout)
         )
-    def forward(self, x):
+        self.fn = fn
+
+    def forward(self, x, **kwargs):
+        if self.fn is not None:
+            return self.fn(self.net(x), **kwargs)
         return self.net(x)
 
 class Attention(nn.Module):
@@ -84,8 +126,27 @@ class Transformer(nn.Module):
                 Residual(PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout))),
                 Residual(PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout)))
             ]))
+            
     def forward(self, x, y=None):
         for attn, ff in self.layers:
             attn_out = attn(x, y)
             output = ff(attn_out)
         return output
+
+class Transformer2(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                Residual(PreNorm(dim, 
+                    FeedForward(dim, mlp_dim, dropout=dropout, 
+                        fn=Residual(PreNorm(dim, 
+                            Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout))))))
+            )
+            
+    def forward(self, x, y=None):
+        for layer in self.layers:
+            output = layer(x, y)
+        return output
+    
