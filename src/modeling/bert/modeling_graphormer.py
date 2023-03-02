@@ -139,15 +139,15 @@ class GraphormerLayer(nn.Module):
         attention_output = attention_outputs[0]
 
         if self.has_graph_conv==True:
-            if self.mesh_type == 'body':
+            if self.mesh_type == 'body' or self.mesh_type == 'smplx':
                 joints = attention_output[:,0:22,:] 
                 vertices = attention_output[:,22:677,:]
                 modal_tokens = attention_output[:,677:,:]
 
-            elif self.mesh_type == 'hand':
-                joints = attention_output[:,0:21,:]
-                vertices = attention_output[:,21:-49,:]
-                modal_tokens = attention_output[:,-49:,:]
+            elif self.mesh_type == 'smpl':
+                joints = attention_output[:,0:24,:]
+                vertices = attention_output[:,24:455,:]
+                modal_tokens = attention_output[:,455:,:]
 
             vertices = self.graph_conv(vertices)
             joints_vertices = torch.cat([joints,vertices,modal_tokens],dim=1)

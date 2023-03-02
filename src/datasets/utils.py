@@ -1,8 +1,9 @@
+import json
 import cv2
 import os
 import torch
 import numpy as np
-import open3d as o3d
+import plyfile
 
 INTRINSIC = {
     'master': np.asarray([
@@ -17,9 +18,9 @@ INTRINSIC = {
 }
 
 
-class SequenceLoader(object):
+class mmBodySequenceLoader(object):
     def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
-                 resource=['radar','master_image','master_image','sub_image','sub_depth'], **kwargs) -> None:
+                 resource=['radar','master_image','master_depth','sub_image','sub_depth']) -> None:
         self.seq_path = seq_path
         self.skip_head = skip_head
         self.skip_tail = skip_tail
@@ -58,16 +59,95 @@ class SequenceLoader(object):
         return result
 
 
+class HuMManSequenceLoader(object):
+    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
+                 resource=['master_image','master_depth','sub_image','sub_depth'], ori_data=False) -> None:
+        self.seq_path = seq_path
+        self.skip_head = skip_head
+        self.skip_tail = skip_tail
+        self.resource = resource
+        self.ori_data = ori_data
+        # load transformation matrix
+        with open(os.path.join(seq_path, 'cameras.json'), 'r', encoding='utf8') as f:
+            self.calib = json.load(f)
+        for k, v in self.calib.items():
+            self.calib[k]['t'] = -np.array(v.pop('T')) @ np.array(v['R'])
+            self.calib[k]['R'] = np.array(v['R']).T
+            self.calib[k]['K'] = np.array(v['K'])
+
+    def __len__(self):
+        return len(os.listdir(os.path.join(self.seq_path, 'smpl_params'))) - self.skip_head - self.skip_tail
+
+    def __getitem__(self, idx: int):
+        result = {}
+        if self.ori_data:
+            result['master_image'] = cv2.imread(os.path.join(
+                self.seq_path, 'kinect_color', 'kinect_000', '%06d.png' % ((idx+self.skip_head)*6)))
+            result['sub_image'] = cv2.imread(os.path.join(
+                self.seq_path, 'kinect_color', 'kinect_001', '%06d.png' % ((idx+self.skip_head)*6)))
+            result['master_depth'] = cv2.imread(os.path.join(self.seq_path, 'kinect_depth', 'kinect_000', 
+                                            '%06d.png' % ((idx+self.skip_head)*6)), cv2.IMREAD_UNCHANGED)
+            result['sub_depth'] = cv2.imread(os.path.join(self.seq_path, 'kinect_depth', 'kinect_001', 
+                                            '%06d.png' % ((idx+self.skip_head)*6)), cv2.IMREAD_UNCHANGED)
+        else:
+            if 'master_image' in self.resource:
+                result['master_image'] = cv2.imread(os.path.join(
+                    self.seq_path, 'crop_image', 'kinect_000', '%06d.png' % ((idx+self.skip_head)*6)))
+            if 'sub_image' in self.resource:
+                result['sub_image'] = cv2.imread(os.path.join(
+                    self.seq_path, 'crop_image', 'kinect_001', '%06d.png' % ((idx+self.skip_head)*6)))
+            if 'master_depth' in self.resource:
+                result['master_depth'] = np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect_000', 
+                                                '%06d.npy' % ((idx+self.skip_head)*6)))
+            if 'sub_depth' in self.resource:
+                result['sub_depth'] = np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect_001', 
+                                                '%06d.npy' % ((idx+self.skip_head)*6)))
+        result['mesh'] = np.load(os.path.join(
+            self.seq_path, 'smpl_params', '%06d.npz' % ((idx+self.skip_head)*6)))
+            
+        return result
+
+class BEHAVESequenceLoader(object):
+    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
+                 resource=['master_image','sub_image','master_depth']) -> None:
+        self.seq_path = seq_path
+        self.skip_head = skip_head
+        self.skip_tail = skip_tail
+        self.resource = resource
+        # load transformation matrix
+        with open(os.path.join(seq_path, 'cameras.json'), 'r', encoding='utf8') as f:
+            self.calib = json.load(f)
+
+    def __len__(self):
+        return len(os.listdir(os.path.join(self.seq_path, 'smpl_params'))) - self.skip_head - self.skip_tail
+    
+    def __getitem__(self, idx: int):
+        result = {}
+        if 'master_image' in self.resource:
+            result['master_image'] = cv2.imread(os.path.join(
+                self.seq_path, 'crop_image', 'kinect0', '{}.png'.format(idx+self.skip_head)))
+        if 'sub_image' in self.resource:
+            result['sub_image'] = cv2.imread(os.path.join(
+                self.seq_path, 'crop_image', 'kinect1', '{}.png'.format(idx+self.skip_head)))
+        if 'master_depth' in self.resource:
+            result['master_depth'] = np.load(os.path.join(self.seq_path, 'depth_pcl', 
+                                            '{}.npy'.format(idx+self.skip_head)))
+        result['mesh'] = np.load(os.path.join(
+            self.seq_path, 'smpl_params', '{}.npz'.format(idx+self.skip_head)))
+            
+        return result
+
 def copy2cpu(tensor):
     if isinstance(tensor, np.ndarray):
         return tensor
     return tensor.detach().cpu().numpy()
 
 
-def project_pcl(pcl, trans_mat=None, cam='master', image_size=np.array([1536,2048])):
+def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=np.array([1536,2048])):
     if trans_mat is not None:
         pcl = (pcl - trans_mat['t']) @ trans_mat['R']
-    pcl_2d = ((pcl/pcl[:,2:3]) @ INTRINSIC[cam].T)[:,:2]
+    intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['master']
+    pcl_2d = ((pcl/pcl[:,2:3]) @ intrinsic.T)[:,:2]
     pcl_2d = np.floor(pcl_2d).astype(int)
     pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
     # filter out the points exceeding the image size
@@ -77,13 +157,14 @@ def project_pcl(pcl, trans_mat=None, cam='master', image_size=np.array([1536,204
     return pcl_2d
 
 
-def project_pcl_torch(pcl, trans_mat=None, cam='master', image_size=torch.tensor([1536,2048])):
+def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=torch.tensor([1536,2048])):
     """
     Project pcl to the image plane
     """
     if trans_mat is not None:
         pcl = (pcl - trans_mat[:,None,:3,3]) @ trans_mat[:,:3,:3]
-    pcl_2d = ((pcl/pcl[:,:,2:3]) @ torch.from_numpy(INTRINSIC[cam]).T.float().cuda())[:,:,:2]
+    intrinsic = intrinsic if intrinsic is not None else INTRINSIC['master']
+    pcl_2d = ((pcl/pcl[:,:,2:3]) @ torch.tensor(intrinsic).T.float().cuda())[:,:,:2]
     pcl_2d = torch.floor(pcl_2d).long()
     pcl_2d[:,:,[0,1]] = pcl_2d[:,:,[1,0]]
     image_size = image_size.cuda()
@@ -91,14 +172,33 @@ def project_pcl_torch(pcl, trans_mat=None, cam='master', image_size=torch.tensor
     pcl_2d = torch.where(pcl_2d>0, pcl_2d, 0)
     return pcl_2d
 
+def depth_2_pcl(depth_image, intrinsic):
+    fx, fy = intrinsic[0][0], intrinsic[1][1]
+    cx, cy = intrinsic[0][2], intrinsic[1][2]
+    
+    depth = depth_image.astype(np.float32) / 1000.0
+    height, width = depth.shape
+    pixel_x, pixel_y = np.meshgrid(np.arange(width), np.arange(height))
+    
+    camera_x = (pixel_x - cx) * depth / fx
+    camera_y = (pixel_y - cy) * depth / fy
+    camera_z = depth
 
-def filter_pcl(bounding_pcl: np.ndarray, target_pcl: np.ndarray, bound: float = 0.2, offset: float = 0):
+    point_cloud = np.stack([camera_x, camera_y, camera_z], axis=-1).reshape(-1, 3)
+    
+    return point_cloud
+
+def filter_pcl(bounding_pcl: np.ndarray, target_pcl: np.ndarray, bound: float = 0.2, 
+               offset: float = 0, height_axis: int = 2, facing_up=True):
     """
     Filter out the pcls of pcl_b that is not in the bounding_box of pcl_a
     """
     upper_bound = bounding_pcl[:, :3].max(axis=0) + bound
     lower_bound = bounding_pcl[:, :3].min(axis=0) - bound
-    lower_bound[2] += offset
+    if facing_up:
+        lower_bound[height_axis] += offset
+    else:
+        upper_bound[height_axis] -= offset
 
     mask_x = (target_pcl[:, 0] >= lower_bound[0]) & (
         target_pcl[:, 0] <= upper_bound[0])
@@ -122,13 +222,15 @@ def pad_pcl(pcl, num_points, return_choices=False):
     return pcl[r, :]
 
 
-def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:bool=False, margin:float=0.2, square:bool=False, cam='master'):
+def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:bool=False, 
+               margin:float=0.2, square:bool=False, intrinsic=None, return_box:bool=False):
     """
     Crop the person area of image
     """
     # transform the joints to camera coordinate
     if trans_mat is not None:
         joints = (joints - trans_mat['t']) @ trans_mat['R']
+    intrinsic = intrinsic if intrinsic is not None else INTRINSIC['master']
     joint_max = joints.max(axis=0) + margin
     joint_min = joints.min(axis=0) - margin
     # get 3d bounding box from joints
@@ -143,7 +245,7 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
         [joint_max[0], joint_min[1], joint_min[2]],
     ])
     # project 3d bounding box to 2d image plane
-    box_2d = project_pcl(box_3d, cam=cam)
+    box_2d = project_pcl(box_3d, intrinsic=intrinsic)
     box_min = box_2d.min(0)
     box_max = box_2d.max(0)
     if square:
@@ -167,6 +269,8 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
         cv2.imshow('img', image)
         cv2.waitKey(0)
 
+    if return_box:
+        return crop_img, box_min, box_max
     return crop_img
 
 def trans_mat_2_tensor(trans_mat):

@@ -2,7 +2,7 @@ import copy
 import random
 import torch
 import numpy as np
-from src.datasets.utils import gen_random_indices, project_pcl_torch
+from src.datasets.utils import INTRINSIC, gen_random_indices, project_pcl_torch
 from src.modeling.bert.transformer import FFN, PredictorLG, Transformer, Transformer2
 
 
@@ -13,8 +13,12 @@ class AdaptiveFusion(torch.nn.Module):
         self.image_backbone = backbone['image']
         self.depth_backbone = backbone['depth']
         self.trans_encoder = trans_encoder
-        self.upsampling = torch.nn.Linear(655, 2619)
-        self.upsampling2 = torch.nn.Linear(2619, 10475)
+        if args.mesh_type == 'smplx':
+            self.upsampling = torch.nn.Linear(655, 2619)
+            self.upsampling2 = torch.nn.Linear(2619, 10475)
+        elif args.mesh_type == 'smpl':
+            self.upsampling = torch.nn.Linear(431, 1723)
+            self.upsampling2 = torch.nn.Linear(1723, 6890)
         self.radar_feat_num_dim = torch.nn.Linear(args.num_clusters, 1)
         self.image_feat_dim = torch.nn.Linear(1024, 2051)
         self.depth_feat_num_dim = torch.nn.Linear(49, 1)
@@ -23,8 +27,6 @@ class AdaptiveFusion(torch.nn.Module):
         self.global_embedding = torch.nn.Embedding(5, 2048)
         self.local_embedding = torch.nn.Embedding(5, 2051)
         self.calib_embedding = torch.nn.Linear(12, 2051)
-        
-        self.input_indices = []
         
     def process_image(self, images, pos_emb):
         # extract grid features and global image features using a CNN backbone
@@ -65,21 +67,27 @@ class AdaptiveFusion(torch.nn.Module):
     def forward(self, args, data_dict, smpl, mesh_sampler, meta_masks=None, is_train=False):
         batch_size = data_dict['joints_3d'].shape[0]
         # Generate T-pose template mesh
-        template_pose = torch.zeros((1, 69))
-        template_pose[:, 0] = 3.1416 # Rectify "upside down" reference mesh in global coord
-        template_pose = template_pose.cuda(args.device)
-        template_betas = torch.zeros((1, 16)).cuda(args.device)
+        if args.mesh_type == 'smplx':
+            template_pose = torch.zeros((1, 69)).cuda(args.device)
+            # template_pose[:, 0] = 3.1416 # Rectify "upside down" reference mesh in global coord
+            template_betas = torch.zeros((1, 16)).cuda(args.device)
+            num_joints = 22
+            num_verts = 655
+        elif args.mesh_type == 'smpl':
+            template_pose = torch.zeros((1, 75)).cuda(args.device)
+            template_betas = torch.zeros((1, 10)).cuda(args.device)
+            num_joints = 24
+            num_verts = 431
         template_res = smpl(template_pose, template_betas)
-        template_vertices = template_res['verts']
+        template_vertices = template_res['vertices']
 
         # template mesh simplification
         template_vertices_sub = mesh_sampler.downsample(template_vertices)
         template_vertices_sub2 = mesh_sampler.downsample(template_vertices_sub, n1=1, n2=2)
 
         # template mesh-to-joint regression
-        template_3d_joints = template_res['joints'][:, :22]
+        template_3d_joints = template_res['joints'][:, :num_joints]
         template_pelvis = template_3d_joints[:, 0, :]
-        num_joints = template_3d_joints.shape[1]
 
         # normalize
         template_3d_joints = template_3d_joints - template_pelvis[:, None, :]
@@ -91,20 +99,20 @@ class AdaptiveFusion(torch.nn.Module):
 
         if is_train:
             inputs = args.inputs.copy()
-            # increase the probability of single input
+            # eliminate random modalities
             if np.random.rand() < args.single_input_ratio:
-                input_mask_indices = gen_random_indices(max_random_num=len(inputs), size=4)
+                input_elim_indices = gen_random_indices(max_random_num=len(inputs), size=4)
             else:
-                input_mask_indices = gen_random_indices(max_random_num=len(inputs))
+                input_elim_indices = gen_random_indices(max_random_num=len(inputs))
             if args.radar_only:
-                input_mask_indices = [1,2,3,4]
+                input_elim_indices = [1,2,3,4]
             if args.image_only:
-                input_mask_indices = [0,2,3,4]
+                input_elim_indices = [0,2,3,4]
             if args.depth_only:
-                input_mask_indices = [0,1,3,4]
-            self.input_indices.append(list(np.delete(np.arange(5), input_mask_indices)))
-            # input mask
-            for i in input_mask_indices:
+                input_elim_indices = [0,1,3,4]
+            if args.full_modalities:
+                input_elim_indices = []
+            for i in input_elim_indices:
                 data_dict[inputs[i]] = torch.Tensor([[]])
                 inputs[i] = ''
             # Modality Masking Module
@@ -173,7 +181,7 @@ class AdaptiveFusion(torch.nn.Module):
 
         if is_train:
             # vertex/joint mask
-            num_mask = 677
+            num_mask = num_joints + num_verts
             special_token = torch.ones_like(features[:,:num_mask,:]).cuda()*0.01
             features[:,:num_mask,:] = features[:,:num_mask,:]*meta_masks[:,:num_mask,:] + special_token*(1-meta_masks[:,:num_mask,:])
 
@@ -187,7 +195,7 @@ class AdaptiveFusion(torch.nn.Module):
             features = self.trans_encoder(features)
 
         pred_3d_joints = features[:,:num_joints,:]
-        pred_vertices_sub2 = features[:,num_joints:677,:]
+        pred_vertices_sub2 = features[:,num_joints:num_joints+num_verts,:]
 
         temp_transpose = pred_vertices_sub2.transpose(1,2)
         pred_vertices_sub = self.upsampling(temp_transpose)
@@ -392,7 +400,7 @@ class TokenFusion(torch.nn.Module):
         self.input_indices = []
         
     def get_img_patch_idx(self, xyz, trans_mat, cam, bbox):
-        proj_uv = project_pcl_torch(xyz, trans_mat, cam=cam)
+        proj_uv = project_pcl_torch(xyz, trans_mat, intrinsic=INTRINSIC[cam])
         bbox_size = bbox[:,2:] - bbox[:,:2]
         trans_uv = (proj_uv - bbox[:,None,:2])*224/bbox_size[:,None]
         pos_idx = (trans_uv // 32).long()

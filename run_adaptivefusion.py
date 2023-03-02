@@ -12,11 +12,11 @@ import gc
 import numpy as np
 import cv2
 from openpyxl import load_workbook, Workbook
-from src.datasets.utils import copy2cpu, crop_image, project_pcl, trans_mat_2_dict
+from src.datasets.utils import copy2cpu, crop_image, project_pcl, trans_mat_2_dict, INTRINSIC
 
 from src.modeling.bert import BertConfig, Graphormer
 import src.modeling.model as Models
-from src.modeling._smpl import SMPL, Mesh, SMPLXModel, SMPLX_MODEL_NEUTRAL_PATH
+from src.modeling._smpl import SMPL, SMPLX, Mesh, SMPLXMesh
 from src.modeling.hrnet.hrnet_cls_net_gridfeat import get_cls_net_gridfeat
 from src.modeling.hrnet.config import config as hrnet_config
 from src.modeling.hrnet.config import update_config as hrnet_update_config
@@ -27,7 +27,6 @@ from src.utils.logger import setup_logger
 from src.utils.comm import synchronize, is_main_process, get_rank, all_gather
 from src.utils.miscellaneous import mkdir, set_seed
 from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
-from src.utils.renderer import Renderer
 from src.utils.metric_pampjpe import reconstruction_error
 import src.datasets.fusion_dataset as Datasets
 from src.utils.loss import LossManager
@@ -150,19 +149,19 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
             image = '{}_image'.format(cam)
         # project points to the image
         orig_img = data_dict['orig_img'][image][idx]
-        pcl_2d = project_pcl(data_dict[pcl_input][idx][:,:3] + gt_pelvis, trans_mat[image], cam=cam)
+        pcl_2d = project_pcl(data_dict[pcl_input][idx][:,:3] + gt_pelvis, trans_mat[image], intrinsic=INTRINSIC[cam])
         # project cluster centers to the image
-        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis, trans_mat[image], cam=cam)
+        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis, trans_mat[image], intrinsic=INTRINSIC[cam])
         blank = np.zeros_like(orig_img[:,:,:1])
         start_idx = 655 + 49 * args.inputs.index(pcl_input)
         # sort the weight
         weight_sorted_idx = np.argsort(norm_attention_to_show[[i+start_idx for i in range(center_2d.shape[0])]])
+        # plot cluster centers in the image
         for i in weight_sorted_idx:
             cv2.circle(blank, (center_2d[i, 1], center_2d[i, 0]), 60, norm_attention_to_show[i+start_idx]*255, -1)
         # apply jet color map
         blank = cv2.applyColorMap(blank, 2)
         img_with_cluster = cv2.addWeighted(orig_img, 0.2, blank, 0.5, 1)
-        # plot cluster centers in the image
         for i in range(-1, 2):
             for j in range(-1, 2):
                 img_with_cluster[pcl_2d[:,0]+i, pcl_2d[:,1]+j] = [0, 255, 0]
@@ -272,13 +271,11 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         gt_3d_joints -= gt_3d_pelvis
         batch_size = gt_3d_joints.shape[0]
 
-        gt_pose = data_dict['pose'].cuda(args.device)
-        gt_betas = data_dict['betas'].cuda(args.device)
         joint_mask = data_dict['joint_mask'].cuda(args.device)
         vert_mask = data_dict['vert_mask'].cuda(args.device)
 
         # generate simplified mesh
-        gt_vertices = smpl(gt_pose, gt_betas)['verts']
+        gt_vertices = data_dict['vertices'].cuda(args.device)
         gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices, n1=0, n2=2)
         gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
 
@@ -469,12 +466,8 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             gt_3d_pelvis = data_dict['root_pelvis'].cuda(args.device)[:,None,:]
             gt_3d_joints -= gt_3d_pelvis
 
-            gt_pose = data_dict['pose'].cuda(args.device)
-            gt_betas = data_dict['betas'].cuda(args.device)
-
             # generate simplified mesh
-            mesh_res = smpl(gt_pose, gt_betas)
-            gt_vertices = mesh_res['verts']
+            gt_vertices = data_dict['vertices'].cuda(args.device)
             gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
             gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices_sub, n1=1, n2=2)
 
@@ -610,16 +603,21 @@ def main(args):
     logger = setup_logger("Graphormer", args.output_dir, get_rank())
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
-    args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth'] if args.train else args.inputs.replace(' ','').split(',')
+    args.inputs = args.inputs.replace(' ','').split(',')
     if args.model == 'TokenFusion':
         args.enabled_inputs = args.inputs
         args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth']
     if not args.inputs:
         raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
-    smpl = SMPLXModel(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, device=args.device).to(args.device)
-    mesh_sampler = Mesh()
-
+    if args.mesh_type == 'smplx':
+        smpl = SMPLX().to(args.device)
+        mesh_sampler = SMPLXMesh()
+        max_position_embeddings = 677
+    elif args.mesh_type == 'smpl':
+        smpl = SMPL().to(args.device)
+        mesh_sampler = Mesh()
+        max_position_embeddings = 455
     # Load model
     trans_encoder = []
 
@@ -648,7 +646,7 @@ def main(args):
             config.output_feature_dim = output_feat_dim[i]
             args.hidden_size = hidden_feat_dim[i]
             args.intermediate_size = int(args.hidden_size*args.interm_size_scale)
-            config.max_position_embeddings = args.max_position_embeddings
+            config.max_position_embeddings = max_position_embeddings
 
             if which_blk_graph[i]==1:
                 config.graph_conv = True
@@ -776,7 +774,7 @@ def parse_args():
     parser.add_argument('--use_pkl', dest="use_pkl", action="store_true", help='use pkl data')
     parser.add_argument('--skip_head', type=int, default=0)
     parser.add_argument('--skip_tail', type=int, default=0)
-    parser.add_argument('--dataset', type=str, default='FusionDataset')
+    parser.add_argument('--dataset', type=str, default='mmBodyDataset')
     parser.add_argument('--num_points', type=int, default=1024)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
     parser.add_argument('--inputs', type=str, default='radar,master_image,master_depth,sub_image,sub_depth', help='input data')
@@ -833,7 +831,7 @@ def parse_args():
                         help="The Image Feature Dimension.")   
     parser.add_argument("--which_gcn", default='0,0,1', type=str, 
                         help="which encoder block to have graph conv. Encoder1, Encoder2, Encoder3. Default: only Encoder3 has graph conv") 
-    parser.add_argument("--mesh_type", default='body', type=str, help="body or hand") 
+    parser.add_argument("--mesh_type", default='smplx', type=str, help="smplx or smpl") 
     parser.add_argument("--interm_size_scale", default=2, type=int)
     parser.add_argument("--num_cluster_feat", default=32, type=int)
     #########################################################
@@ -859,12 +857,12 @@ def parse_args():
     parser.add_argument('--radar_only', action="store_true")
     parser.add_argument('--image_only', action="store_true")
     parser.add_argument('--depth_only', action="store_true")
+    parser.add_argument('--full_modalities', action="store_true")
     parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--wo_MMM', action="store_true")
     parser.add_argument('--wo_local_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
-    parser.add_argument('--max_position_embeddings', type=int, default=677)
     parser.add_argument('--single_input_ratio', type=float, default=0.)
     parser.add_argument('--calib_emb', action="store_true")
     parser.add_argument('--shuffle_inputs', action="store_true")

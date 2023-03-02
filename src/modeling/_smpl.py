@@ -18,25 +18,19 @@ from src.utils.geometric_layers import rodrigues
 import src.modeling.data.config as cfg
 
 import torch
-import torch.nn.functional as F
-from torch.nn.modules.loss import _Loss
 from human_body_prior.body_model.body_model import BodyModel
 from human_body_prior.body_model.lbs import lbs
 from src.datasets.utils import rodrigues_2_rot_mat
-from src.utils.mesh_sampling import generate_transform_matrices
-from psbody.mesh import Mesh as SMPLMesh
+
+SMPL_MODEL_NEUTRAL_PATH = 'models/smpl/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl'
+    
+SMPLX_MODEL_FEMALE_PATH = 'models/smplx/female/model.npz'
+SMPLX_MODEL_MALE_PATH = 'models/smplx/male/model.npz'
+SMPLX_MODEL_NEUTRAL_PATH = 'models/smplx/neutral/model.npz'
+
 class SMPL(nn.Module):
-
-    def __init__(self, gender='neutral'):
+    def __init__(self, model_file=SMPL_MODEL_NEUTRAL_PATH):
         super(SMPL, self).__init__()
-
-        if gender=='m':
-            model_file=cfg.SMPL_Male
-        elif gender=='f':
-            model_file=cfg.SMPL_Female
-        else:
-            model_file=cfg.SMPL_FILE
-
         smpl_model = pickle.load(open(model_file, 'rb'), encoding='latin1') 
         J_regressor = smpl_model['J_regressor'].tocoo()
         row = J_regressor.row
@@ -66,6 +60,7 @@ class SMPL(nn.Module):
         self.verts = None
         self.J = None
         self.R = None
+        self.f = self.faces
         
         J_regressor_extra = torch.from_numpy(np.load(cfg.JOINT_REGRESSOR_TRAIN_EXTRA)).float()
         self.register_buffer('J_regressor_extra', J_regressor_extra)
@@ -75,24 +70,30 @@ class SMPL(nn.Module):
         self.register_buffer('J_regressor_h36m_correct', J_regressor_h36m_correct)
 
 
-    def forward(self, pose, beta):
+    def forward(self, pose, betas):
         device = pose.device
+        for name in ['J_regressor', 'weights', 'posedirs', 'v_template', 'shapedirs', 'faces', 
+                     'kintree_table', 'parent', 'J_regressor_extra', 'J_regressor_h36m_correct']:
+            _tensor = getattr(self, name)
+            setattr(self, name, _tensor.to(device))
         batch_size = pose.shape[0]
+        trans = pose[:, :3]
+        body_pose = pose[:, 3:]
         v_template = self.v_template[None, :]
         shapedirs = self.shapedirs.view(-1,10)[None, :].expand(batch_size, -1, -1)
-        beta = beta[:, :, None]
-        v_shaped = torch.matmul(shapedirs, beta).view(-1, 6890, 3) + v_template
+        betas = betas[:, :, None]
+        v_shaped = torch.matmul(shapedirs, betas).view(-1, 6890, 3) + v_template
         # batched sparse matmul not supported in pytorch
         J = []
         for i in range(batch_size):
             J.append(torch.matmul(self.J_regressor, v_shaped[i]))
         J = torch.stack(J, dim=0)
         # input it rotmat: (bs,24,3,3)
-        if pose.ndimension() == 4:
-            R = pose
+        if body_pose.ndimension() == 4:
+            R = body_pose
         # input it rotmat: (bs,72)
-        elif pose.ndimension() == 2:
-            pose_cube = pose.view(-1, 3) # (batch_size * 24, 1, 3)
+        elif body_pose.ndimension() == 2:
+            pose_cube = body_pose.view(-1, 3) # (batch_size * 24, 1, 3)
             R = rodrigues(pose_cube).view(batch_size, 24, 3, 3)
             R = R.view(batch_size, 24, 3, 3)
         I_cube = torch.eye(3)[None, None, :].to(device)
@@ -118,7 +119,10 @@ class SMPL(nn.Module):
         T = torch.matmul(self.weights, G.permute(1,0,2,3).contiguous().view(24,-1)).view(6890, batch_size, 4, 4).transpose(0,1)
         rest_shape_h = torch.cat([v_posed, torch.ones_like(v_posed)[:, :, [0]]], dim=-1)
         v = torch.matmul(T, rest_shape_h[:, :, :, None])[:, :, :3, 0]
-        return v
+        j = self.get_joints(v)
+        joints = j + trans.unsqueeze(dim=1)
+        verts = v + trans.unsqueeze(dim=1)
+        return dict(vertices=verts, joints=joints)
 
     def get_joints(self, vertices):
         """
@@ -218,52 +222,10 @@ def get_graph_params(filename, nsize=1):
     A = [adjmat_sparse(a, nsize=nsize) for a in A]
     return A, U, D
 
-
-SMPLX_MODEL_FEMALE_PATH = 'models/smplx/female/model.npz'
-SMPLX_MODEL_MALE_PATH = 'models/smplx/male/model.npz'
-SMPLX_MODEL_NEUTRAL_PATH = 'models/smplx/neutral/model.npz'
-
-class SMPLXModel(BodyModel):
-    def __init__(self, device=None, **kwargs):
-        super().__init__(**kwargs)
-        self.device = device if device is not None else torch.device('cuda')
-        for name in ['init_pose_hand', 'init_pose_jaw','init_pose_eye', 'init_v_template', 'init_expression', 
-                    'shapedirs', 'exprdirs', 'posedirs', 'J_regressor', 'kintree_table', 'weights', ]:
-            _tensor = getattr(self, name)
-            setattr(self, name, _tensor.to(device))
-        
-    def forward(self, pose_body, betas, use_rodrigues=True):
-        batch_size = pose_body.shape[0]
-        trans = pose_body[:, :3]
-        
-        pose_hand = self.init_pose_hand.expand(batch_size, -1)
-        pose_jaw = self.init_pose_jaw.expand(batch_size, -1)
-        pose_eye = self.init_pose_eye.expand(batch_size, -1)
-        v_template = self.init_v_template.expand(batch_size, -1, -1)
-        expression = self.init_expression.expand(batch_size, -1)
-        
-
-        init_pose = torch.cat([pose_jaw, pose_eye, pose_hand], dim=-1)
-        if not use_rodrigues:
-            init_pose = rodrigues_2_rot_mat(init_pose)
-        full_pose = torch.cat([pose_body[:, 3:], init_pose], dim=-1)
-        shape_components = torch.cat([betas, expression], dim=-1)
-        shapedirs = torch.cat([self.shapedirs, self.exprdirs], dim=-1)
-
-        verts, joints = lbs(betas=shape_components, pose=full_pose, v_template=v_template,
-                        shapedirs=shapedirs, posedirs=self.posedirs, J_regressor=self.J_regressor,
-                        parents=self.kintree_table[0].long(), lbs_weights=self.weights, pose2rot=use_rodrigues)
-
-        joints = joints + trans.unsqueeze(dim=1)
-        verts = verts + trans.unsqueeze(dim=1)
-        return dict(verts=verts, joints=joints)
-
 class Mesh(object):
     """Mesh object that is used for handling certain graph operations."""
-    def __init__(self, filename=cfg.SMPL_sampling_matrix,
-                 num_downsampling=1, nsize=1, device=torch.device('cuda')):
-        # mesh = SMPLMesh(ref_vertices.detach().cpu().numpy(), smpl.f.detach().cpu().numpy())
-        # self._A, self._U, self._D = get_graph_params(mesh, nsize=nsize)
+    def __init__(self, filename=cfg.SMPL_sampling_matrix, 
+                num_downsampling=1, nsize=1, device=torch.device('cuda')):
         self._A, self._U, self._D = get_graph_params(filename=filename, nsize=nsize)
         # self._A = [a.to(device) for a in self._A]
         self._U = [u.to(device) for u in self._U]
@@ -271,16 +233,14 @@ class Mesh(object):
         self.num_downsampling = num_downsampling
 
         # load template vertices from SMPL and normalize them
-        # smpl = SMPL()
-        smpl = SMPLXModel(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, device=device)
-        ref_vertices = smpl.init_v_template[0]
-
+        smpl = SMPL()
+        ref_vertices = smpl.v_template
         center = 0.5*(ref_vertices.max(dim=0)[0] + ref_vertices.min(dim=0)[0])[None]
         ref_vertices -= center
         ref_vertices /= ref_vertices.abs().max().item()
 
         self._ref_vertices = ref_vertices.to(device)
-        self.faces = smpl.f.int().to(device)
+        self.faces = smpl.faces.int().to(device)
 
 
     @property
@@ -327,3 +287,56 @@ class Mesh(object):
                 out.append(y)
             x = torch.stack(out, dim=0)
         return x
+
+class SMPLX(BodyModel):
+    def __init__(self, **kwargs):
+        super().__init__(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, **kwargs)
+
+    def forward(self, pose_body, betas, use_rodrigues=True):
+        device = pose_body.device
+        for name in ['init_pose_hand', 'init_pose_jaw','init_pose_eye', 'init_v_template', 'init_expression', 
+                    'shapedirs', 'exprdirs', 'posedirs', 'J_regressor', 'kintree_table', 'weights', ]:
+            _tensor = getattr(self, name)
+            setattr(self, name, _tensor.to(device))
+
+        batch_size = pose_body.shape[0]
+        trans = pose_body[:, :3]
+        pose_hand = self.init_pose_hand.expand(batch_size, -1)
+        pose_jaw = self.init_pose_jaw.expand(batch_size, -1)
+        pose_eye = self.init_pose_eye.expand(batch_size, -1)
+        v_template = self.init_v_template.expand(batch_size, -1, -1)
+        expression = self.init_expression.expand(batch_size, -1)
+
+        init_pose = torch.cat([pose_jaw, pose_eye, pose_hand], dim=-1)
+        if not use_rodrigues:
+            init_pose = rodrigues_2_rot_mat(init_pose)
+        full_pose = torch.cat([pose_body[:, 3:], init_pose], dim=-1)
+        shape_components = torch.cat([betas, expression], dim=-1)
+        shapedirs = torch.cat([self.shapedirs, self.exprdirs], dim=-1)
+
+        verts, joints = lbs(betas=shape_components, pose=full_pose, v_template=v_template,
+                        shapedirs=shapedirs, posedirs=self.posedirs, J_regressor=self.J_regressor,
+                        parents=self.kintree_table[0].long(), lbs_weights=self.weights, pose2rot=use_rodrigues)
+
+        joints = joints + trans.unsqueeze(dim=1)
+        verts = verts + trans.unsqueeze(dim=1)
+        return dict(vertices=verts, joints=joints)
+
+class SMPLXMesh(Mesh):
+    def __init__(self, filename=cfg.SMPLX_sampling_matrix,
+                 num_downsampling=1, nsize=1, device=torch.device('cuda')):
+        self._A, self._U, self._D = get_graph_params(filename=filename, nsize=nsize)
+        self._U = [u.to(device) for u in self._U]
+        self._D = [d.to(device) for d in self._D]
+        self.num_downsampling = num_downsampling
+
+        # load template vertices from SMPL and normalize them
+        smpl = SMPLX()
+        ref_vertices = smpl.init_v_template[0]
+
+        center = 0.5*(ref_vertices.max(dim=0)[0] + ref_vertices.min(dim=0)[0])[None]
+        ref_vertices -= center
+        ref_vertices /= ref_vertices.abs().max().item()
+
+        self._ref_vertices = ref_vertices.to(device)
+        self.faces = smpl.f.int().to(device)

@@ -22,7 +22,7 @@ from src.datasets.utils import copy2cpu, convert_square_image, crop_image, proje
 
 from src.modeling.bert import BertConfig, Graphormer
 import src.modeling.bert.e2e_body_network as Models
-from src.modeling._smpl import SMPL, Mesh, SMPLXModel, SMPLX_MODEL_NEUTRAL_PATH
+from src.modeling._smpl import SMPL, SMPLXMesh, SMPLX, SMPLX_MODEL_NEUTRAL_PATH
 from src.modeling.hrnet.hrnet_cls_net_gridfeat import get_cls_net_gridfeat
 from src.modeling.hrnet.config import config as hrnet_config
 from src.modeling.hrnet.config import update_config as hrnet_update_config
@@ -231,7 +231,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
         cluster_mask = annotations['cluster_mask'].cuda(args.device)
 
         # generate simplified mesh
-        gt_vertices = smpl(gt_pose, gt_betas)['verts']
+        gt_vertices = smpl(gt_pose, gt_betas)['vertices']
         gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices, n1=0, n2=2)
         gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
 
@@ -453,7 +453,7 @@ def run_validate(args, val_loader, Graphormer_model, criterion, criterion_vertic
 
             # generate simplified mesh
             mesh_res = smpl(gt_pose, gt_betas)
-            gt_vertices = mesh_res['verts']
+            gt_vertices = mesh_res['vertices']
             gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
             gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices_sub, n1=1, n2=2)
 
@@ -759,8 +759,8 @@ def main(args):
     logger.info("Using {} GPUs".format(args.num_gpus))
 
     # Mesh and SMPL utils
-    smpl = SMPLXModel(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, device=args.device).to(args.device)
-    mesh_sampler = Mesh()
+    smpl = SMPLX().to(args.device)
+    mesh_sampler = SMPLXMesh()
 
     # Renderer for visualization
     renderer = Renderer(faces=smpl.f.cpu().numpy())

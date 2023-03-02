@@ -40,7 +40,7 @@ class Graphormer_Body_Network(torch.nn.Module):
         template_pose = template_pose.cuda(self.config.device)
         template_betas = torch.zeros((1,16)).cuda(self.config.device)
         template_res = smpl(template_pose, template_betas)
-        template_vertices = template_res['verts']
+        template_vertices = template_res['vertices']
 
         # template mesh simplification
         template_vertices_sub = mesh_sampler.downsample(template_vertices)
@@ -149,7 +149,7 @@ class ImmFusion(Graphormer_Body_Network):
         template_pose = template_pose.cuda(self.config.device)
         template_betas = torch.zeros((1,16)).cuda(self.config.device)
         template_res = smpl(template_pose, template_betas)
-        template_vertices = template_res['verts']
+        template_vertices = template_res['vertices']
 
         # template mesh simplification
         template_vertices_sub = mesh_sampler.downsample(template_vertices)
@@ -301,7 +301,7 @@ class EndFusionGraphormer(Graphormer_Body_Network):
         template_pose = template_pose.cuda(self.config.device)
         template_betas = torch.zeros((1,16)).cuda(self.config.device)
         template_res = smpl(template_pose, template_betas)
-        template_vertices = template_res['verts']
+        template_vertices = template_res['vertices']
 
         # template mesh simplification
         template_vertices_sub = mesh_sampler.downsample(template_vertices)
@@ -424,7 +424,7 @@ class MidFusionGraphormer(Graphormer_Body_Network):
         template_pose = template_pose.cuda(self.config.device)
         template_betas = torch.zeros((1,16)).cuda(self.config.device)
         template_res = smpl(template_pose, template_betas)
-        template_vertices = template_res['verts']
+        template_vertices = template_res['vertices']
 
         # template mesh simplification
         template_vertices_sub = mesh_sampler.downsample(template_vertices)

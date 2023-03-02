@@ -55,7 +55,7 @@ class GraphResBlock(torch.nn.Module):
     """
     Graph Residual Block similar to the Bottleneck Residual Block in ResNet
     """
-    def __init__(self, in_channels, out_channels, mesh_type='body'):
+    def __init__(self, in_channels, out_channels, mesh_type='smplx'):
         super(GraphResBlock, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -82,24 +82,6 @@ class GraphResBlock(torch.nn.Module):
 
         return z
 
-# class GraphResBlock(torch.nn.Module):
-#     """
-#     Graph Residual Block similar to the Bottleneck Residual Block in ResNet
-#     """
-#     def __init__(self, in_channels, out_channels, mesh_type='body'):
-#         super(GraphResBlock, self).__init__()
-#         self.in_channels = in_channels
-#         self.out_channels = out_channels
-#         self.conv = GraphConvolution(self.in_channels, self.out_channels, mesh_type)
-#         print('Use BertLayerNorm and GeLU in GraphResBlock')
-#         self.norm = BertLayerNorm(self.out_channels)
-#     def forward(self, x):
-#         y = self.conv(x)
-#         y = self.norm(y)
-#         y = gelu(y)
-#         z = x+y
-#         return z
-
 class GraphLinear(torch.nn.Module):
     """
     Generalization of 1x1 convolutions on Graphs
@@ -122,22 +104,19 @@ class GraphLinear(torch.nn.Module):
 
 class GraphConvolution(torch.nn.Module):
     """Simple GCN layer, similar to https://arxiv.org/abs/1609.02907."""
-    def __init__(self, in_features, out_features, mesh='body', bias=True):
+    def __init__(self, in_features, out_features, mesh='smplx', bias=True):
         super(GraphConvolution, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
 
-        if mesh=='body':
-            adj_indices = torch.load('./src/modeling/data/smpl_431_adjmat_indices.pt')
-            adj_mat_value = torch.load('./src/modeling/data/smpl_431_adjmat_values.pt')
-            adj_mat_size = torch.load('./src/modeling/data/smpl_431_adjmat_size.pt')
-        elif mesh=='hand':
-            adj_indices = torch.load('./src/modeling/data/mano_195_adjmat_indices.pt')
-            adj_mat_value = torch.load('./src/modeling/data/mano_195_adjmat_values.pt')
-            adj_mat_size = torch.load('./src/modeling/data/mano_195_adjmat_size.pt')
-
-        # self.adjmat = torch.sparse_coo_tensor(adj_indices, adj_mat_value, size=adj_mat_size).to(device)
-        self.adjmat = torch.load('./src/modeling/data/smplx_655_adjmat.pt')
+        if mesh=='smplx':
+            self.adjmat = torch.load('./src/modeling/data/smplx_655_adjmat.pt')
+        elif mesh=='smpl':
+            self.adjmat = torch.load('./src/modeling/data/smpl_431_adjmat.pt')
+            # adj_indices = torch.load('./src/modeling/data/smpl_431_adjmat_indices.pt')
+            # adj_mat_value = torch.load('./src/modeling/data/smpl_431_adjmat_values.pt')
+            # adj_mat_size = torch.load('./src/modeling/data/smpl_431_adjmat_size.pt')
+            # self.adjmat = torch.sparse_coo_tensor(adj_indices, adj_mat_value, size=adj_mat_size)
 
         self.weight = torch.nn.Parameter(torch.FloatTensor(in_features, out_features))
         if bias:
