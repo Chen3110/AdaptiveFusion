@@ -139,7 +139,7 @@ class GraphormerLayer(nn.Module):
         attention_output = attention_outputs[0]
 
         if self.has_graph_conv==True:
-            if self.mesh_type == 'body' or self.mesh_type == 'smplx':
+            if self.mesh_type == 'smplx':
                 joints = attention_output[:,0:22,:] 
                 vertices = attention_output[:,22:677,:]
                 modal_tokens = attention_output[:,677:,:]

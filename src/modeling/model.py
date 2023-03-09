@@ -9,9 +9,9 @@ from src.modeling.bert.transformer import FFN, PredictorLG, Transformer, Transfo
 class AdaptiveFusion(torch.nn.Module):
     def __init__(self, args, backbone, trans_encoder):
         super(AdaptiveFusion, self).__init__()
-        self.radar_backbone = backbone['radar']
         self.image_backbone = backbone['image']
         self.depth_backbone = backbone['depth']
+        self.radar_backbone = backbone['radar']
         self.trans_encoder = trans_encoder
         if args.mesh_type == 'smplx':
             self.upsampling = torch.nn.Linear(655, 2619)
@@ -24,8 +24,8 @@ class AdaptiveFusion(torch.nn.Module):
         self.depth_feat_num_dim = torch.nn.Linear(49, 1)
         self.point_embedding = torch.nn.Linear(3, 2051)
         self.GIM = Transformer(dim=2048, depth=3, heads=8, dim_head=256, mlp_dim=4096)
-        self.global_embedding = torch.nn.Embedding(5, 2048)
-        self.local_embedding = torch.nn.Embedding(5, 2051)
+        self.global_embedding = torch.nn.Embedding(10, 2048)
+        self.local_embedding = torch.nn.Embedding(10, 2051)
         self.calib_embedding = torch.nn.Linear(12, 2051)
         
     def process_image(self, images, pos_emb):
@@ -100,62 +100,52 @@ class AdaptiveFusion(torch.nn.Module):
         if is_train:
             inputs = args.inputs.copy()
             # eliminate random modalities
-            if np.random.rand() < args.single_input_ratio:
-                input_elim_indices = gen_random_indices(max_random_num=len(inputs), size=4)
+            input_elim_indices = list(range(len(inputs)))
+            if args.image_only:
+                input_elim_indices.remove(inputs.index('image0'))
+            elif args.depth_only:
+                input_elim_indices.remove(inputs.index('depth0'))
+            elif args.radar_only:
+                input_elim_indices.remove(inputs.index('radar0'))
+            elif args.full_modalities:
+                input_elim_indices = []
             else:
                 input_elim_indices = gen_random_indices(max_random_num=len(inputs))
-            if args.radar_only:
-                input_elim_indices = [1,2,3,4]
-            if args.image_only:
-                input_elim_indices = [0,2,3,4]
-            if args.depth_only:
-                input_elim_indices = [0,1,3,4]
-            if args.full_modalities:
-                input_elim_indices = []
             for i in input_elim_indices:
                 data_dict[inputs[i]] = torch.Tensor([[]])
                 inputs[i] = ''
+                
             # Modality Masking Module
             if not args.wo_MMM:
-                image_indices = gen_random_indices(batch_size, size=3)
-                if 'master_image' in inputs:
-                    master_image_mask = np.ones((batch_size, 1, 1, 1))
-                    master_image_mask[image_indices[:2]] = 0.0
-                    master_image_mask = torch.from_numpy(master_image_mask).float().to(args.device)
-                    master_image_mask = master_image_mask.expand(-1, 3, 224, 224)
-                    data_dict['master_image'] *= master_image_mask
-                if 'sub_image' in inputs:
-                    sub_image_mask = np.ones((batch_size, 1, 1, 1))
-                    sub_image_mask[image_indices[1:]] = 0.0
-                    sub_image_mask = torch.from_numpy(sub_image_mask).float().to(args.device)
-                    sub_image_mask = sub_image_mask.expand(-1, 3, 224, 224)
-                    data_dict['sub_image'] *= sub_image_mask
+                for image in args.input_dict['image']:
+                    if image in inputs:
+                        image_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        image_mask = np.ones((batch_size, 1, 1, 1))
+                        image_mask[image_mask_indices] = 0.0
+                        image_mask = torch.from_numpy(image_mask).float().to(args.device)
+                        image_mask = image_mask.expand(-1, 3, 224, 224)
+                        data_dict[image] *= image_mask
                     
-                point_indices = gen_random_indices(batch_size, size=3)
-                if 'master_depth' in inputs:
-                    master_point_mask = np.ones((batch_size, 1, 1))
-                    master_point_mask[point_indices[:2]] = 0.0
-                    master_point_mask = torch.from_numpy(master_point_mask).float().to(args.device)
-                    master_point_mask = master_point_mask.expand(-1, 4096, 6)
-                    data_dict['master_depth'] *= master_point_mask
-                if 'sub_depthe' in inputs:
-                    sub_point_mask = np.ones((batch_size, 1, 1))
-                    sub_point_mask[point_indices[1:]] = 0.0
-                    sub_point_mask = torch.from_numpy(sub_point_mask).float().to(args.device)
-                    sub_point_mask = sub_point_mask.expand(-1, 4096, 6)
-                    data_dict['sub_depthe'] *= sub_point_mask
-        
+                for depth in args.input_dict['depth']:
+                    if depth in inputs:
+                        depth_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        depth_mask = np.ones((batch_size, 1, 1))
+                        depth_mask[depth_mask_indices] = 0.0
+                        depth_mask = torch.from_numpy(depth_mask).float().to(args.device)
+                        depth_mask = depth_mask.expand(-1, 4096, 6)
+                        data_dict[depth] *= depth_mask
+                        
         global_feats = []
         local_feats = []
         cluster_centers = {}
         
         # extract global and local features
-        for i, input in enumerate(['radar','master_image','master_depth','sub_image','sub_depth']):
+        for input in args.inputs:
             if data_dict[input].shape[1]:
-                if i == 1 or i == 3:
-                    gloabl_feat, local_feat = self.process_image(data_dict[input], pos_emb=i)
+                if input in args.input_dict['image']:
+                    gloabl_feat, local_feat = self.process_image(data_dict[input], pos_emb=int(input[-1]))
                 else:
-                    gloabl_feat, local_feat, xyz = self.process_point(data_dict[input], pos_emb=i)
+                    gloabl_feat, local_feat, xyz = self.process_point(data_dict[input], pos_emb=int(input[-1]))
                     cluster_centers[input] = xyz
                 global_feats.append(gloabl_feat)
                 local_feats.append(local_feat)
@@ -209,9 +199,9 @@ class AdaptiveFusion(torch.nn.Module):
 class DeepFusion(torch.nn.Module):
     def __init__(self, args, backbone, trans_encoder):
         super(DeepFusion, self).__init__()
-        self.radar_backbone = backbone['radar']
         self.image_backbone = backbone['image']
         self.depth_backbone = backbone['depth']
+        self.radar_backbone = backbone['radar']
         self.trans_encoder = trans_encoder
         self.upsampling = torch.nn.Linear(655, 2619)
         self.upsampling2 = torch.nn.Linear(2619, 10475)
@@ -220,8 +210,8 @@ class DeepFusion(torch.nn.Module):
         self.depth_feat_num_dim = torch.nn.Linear(49, 1)
         self.point_embedding = torch.nn.Linear(3, 2048)
         self.transformer = Transformer(dim=2048, depth=3, heads=8, dim_head=256, mlp_dim=4096)
-        self.global_embedding = torch.nn.Embedding(5, 2048)
-        self.local_embedding = torch.nn.Embedding(5, 2048)
+        self.global_embedding = torch.nn.Embedding(10, 2048)
+        self.local_embedding = torch.nn.Embedding(10, 2048)
         
         self.input_indices = []
         
@@ -283,65 +273,51 @@ class DeepFusion(torch.nn.Module):
 
         if is_train:
             inputs = args.inputs.copy()
-            # increase the probability of single input
-            if np.random.rand() < args.single_input_ratio:
-                input_mask_indices = gen_random_indices(max_random_num=len(inputs), size=4)
-            else:
-                input_mask_indices = gen_random_indices(max_random_num=len(inputs))
-            if args.radar_only:
-                input_mask_indices = [1,2,3,4]
+            # eliminate random modalities
+            input_elim_indices = gen_random_indices(max_random_num=len(inputs))
             if args.image_only:
-                input_mask_indices = [0,2,3,4]
+                input_elim_indices = range(len(inputs)).pop(inputs.index('image0'))
             if args.depth_only:
-                input_mask_indices = [0,1,3,4]
-            self.input_indices.append(list(np.delete(np.arange(5), input_mask_indices)))
-            # input mask
-            for i in input_mask_indices:
+                input_elim_indices = range(len(inputs)).pop(inputs.index('depth0'))
+            if args.radar_only:
+                input_elim_indices = range(len(inputs)).pop(inputs.index('radar0'))
+            if args.full_modalities:
+                input_elim_indices = []
+            for i in input_elim_indices:
                 data_dict[inputs[i]] = torch.Tensor([[]])
                 inputs[i] = ''
                 
             # Modality Masking Module
             if not args.wo_MMM:
-                image_indices = gen_random_indices(batch_size, size=3)
-                if 'master_image' in inputs:
-                    master_image_mask = np.ones((batch_size, 1, 1, 1))
-                    master_image_mask[image_indices[:2]] = 0.0
-                    master_image_mask = torch.from_numpy(master_image_mask).float().to(args.device)
-                    master_image_mask = master_image_mask.expand(-1, 3, 224, 224)
-                    data_dict['master_image'] *= master_image_mask
-                if 'sub_image' in inputs:
-                    sub_image_mask = np.ones((batch_size, 1, 1, 1))
-                    sub_image_mask[image_indices[1:]] = 0.0
-                    sub_image_mask = torch.from_numpy(sub_image_mask).float().to(args.device)
-                    sub_image_mask = sub_image_mask.expand(-1, 3, 224, 224)
-                    data_dict['sub_image'] *= sub_image_mask
+                for image in args.input_dict['image']:
+                    if image in inputs:
+                        image_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        image_mask = np.ones((batch_size, 1, 1, 1))
+                        image_mask[image_mask_indices] = 0.0
+                        image_mask = torch.from_numpy(image_mask).float().to(args.device)
+                        image_mask = image_mask.expand(-1, 3, 224, 224)
+                        data_dict[image] *= image_mask
                     
-                point_indices = gen_random_indices(batch_size, size=3)
-                if 'master_depth' in inputs:
-                    master_point_mask = np.ones((batch_size, 1, 1))
-                    master_point_mask[point_indices[:2]] = 0.0
-                    master_point_mask = torch.from_numpy(master_point_mask).float().to(args.device)
-                    master_point_mask = master_point_mask.expand(-1, 4096, 6)
-                    data_dict['master_depth'] *= master_point_mask
-                if 'sub_depthe' in inputs:
-                    sub_point_mask = np.ones((batch_size, 1, 1))
-                    sub_point_mask[point_indices[1:]] = 0.0
-                    sub_point_mask = torch.from_numpy(sub_point_mask).float().to(args.device)
-                    sub_point_mask = sub_point_mask.expand(-1, 4096, 6)
-                    data_dict['sub_depthe'] *= sub_point_mask
-                    
+                for depth in args.input_dict['depth']:
+                    if depth in inputs:
+                        depth_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        depth_mask = np.ones((batch_size, 1, 1))
+                        depth_mask[depth_mask_indices] = 0.0
+                        depth_mask = torch.from_numpy(depth_mask).float().to(args.device)
+                        depth_mask = depth_mask.expand(-1, 4096, 6)
+                        data_dict[depth] *= depth_mask
+                        
         local_feats = []
-        cluster_centers = {}
         
-        # extract local features
-        for i, input in enumerate(['radar','master_image','master_depth','sub_image','sub_depth']):
+        # extract global and local features
+        for input in args.inputs:
             if data_dict[input].shape[1]:
-                if i == 1 or i == 3:
-                    local_feat = self.process_image(data_dict[input], pos_emb=i)
+                if input in args.input_dict['image']:
+                    local_feat = self.process_image(data_dict[input], pos_emb=int(input[-1]))
                 else:
-                    local_feat = self.process_point(data_dict[input], pos_emb=i)
+                    local_feat = self.process_point(data_dict[input], pos_emb=int(input[-1]))
                 local_feats.append(local_feat)
-            
+                
         # concatinate local features
         local_feats = torch.cat(local_feats, dim=1)
         fusion_feats = self.transformer(local_feats)
@@ -358,12 +334,7 @@ class DeepFusion(torch.nn.Module):
 
         pred_dict = {}
         # forward pass
-        if args.show_att:
-            features, _, att = self.trans_encoder(features)
-            pred_dict['attention'] = att[-1]
-            pred_dict['cluster_centers'] = cluster_centers
-        else:
-            features = self.trans_encoder(features)
+        features = self.trans_encoder(features)
 
         pred_3d_joints = features[:,:num_joints,:]
         pred_vertices_sub2 = features[:,num_joints:677,:]
@@ -380,9 +351,9 @@ class DeepFusion(torch.nn.Module):
 class TokenFusion(torch.nn.Module):
     def __init__(self, args, backbone, trans_encoder):
         super(TokenFusion, self).__init__()
-        self.radar_backbone = backbone['radar']
         self.image_backbone = backbone['image']
         self.depth_backbone = backbone['depth']
+        self.radar_backbone = backbone['radar']
         self.image_trans_encoder = Transformer2(dim=2048, depth=3, heads=8, dim_head=256, mlp_dim=4096)
         self.point_trans_encoder = copy.deepcopy(self.image_trans_encoder)
         self.trans_encoder = trans_encoder
@@ -392,15 +363,15 @@ class TokenFusion(torch.nn.Module):
         self.image_feat_dim = torch.nn.Linear(1024, 2048)
         self.depth_feat_num_dim = torch.nn.Linear(49, 1)
         self.point_embedding = torch.nn.Linear(3, 2048)
-        self.global_embedding = torch.nn.Embedding(5, 2048)
-        self.local_embedding = torch.nn.Embedding(5, 2048)
+        self.global_embedding = torch.nn.Embedding(10, 2048)
+        self.local_embedding = torch.nn.Embedding(10, 2048)
         self.score_net = torch.nn.ModuleList([PredictorLG(2048) for _ in range(3)])
         self.patch_mlp = torch.nn.ModuleList([FFN(2048, 4096, 2048, 3) for _ in range(3)])
         
         self.input_indices = []
         
-    def get_img_patch_idx(self, xyz, trans_mat, cam, bbox):
-        proj_uv = project_pcl_torch(xyz, trans_mat, intrinsic=INTRINSIC[cam])
+    def get_img_patch_idx(self, xyz, trans_mat, image, bbox):
+        proj_uv = project_pcl_torch(xyz, trans_mat, intrinsic=INTRINSIC[image])
         bbox_size = bbox[:,2:] - bbox[:,:2]
         trans_uv = (proj_uv - bbox[:,None,:2])*224/bbox_size[:,None]
         pos_idx = (trans_uv // 32).long()
@@ -467,52 +438,40 @@ class TokenFusion(torch.nn.Module):
 
         if is_train:
             inputs = args.inputs.copy()
-            # increase the probability of single input
-            if np.random.rand() < args.single_input_ratio:
-                input_mask_indices = gen_random_indices(max_random_num=len(inputs), size=4)
-            else:
-                input_mask_indices = gen_random_indices(max_random_num=len(inputs))
-            if args.radar_only:
-                input_mask_indices = [1,2,3,4]
+            # eliminate random modalities
+            input_elim_indices = gen_random_indices(max_random_num=len(inputs))
             if args.image_only:
-                input_mask_indices = [0,2,3,4]
+                input_elim_indices = range(len(inputs)).pop(inputs.index('image0'))
             if args.depth_only:
-                input_mask_indices = [0,1,3,4]
-            self.input_indices.append(list(np.delete(np.arange(5), input_mask_indices)))
-            # input mask
-            for i in input_mask_indices:
-                data_dict[inputs[i]] = torch.zeros_like(data_dict[inputs[i]])
+                input_elim_indices = range(len(inputs)).pop(inputs.index('depth0'))
+            if args.radar_only:
+                input_elim_indices = range(len(inputs)).pop(inputs.index('radar0'))
+            if args.full_modalities:
+                input_elim_indices = []
+            for i in input_elim_indices:
+                data_dict[inputs[i]] = torch.Tensor([[]])
                 inputs[i] = ''
                 
             # Modality Masking Module
             if not args.wo_MMM:
-                image_indices = gen_random_indices(batch_size, size=3)
-                if 'master_image' in inputs:
-                    master_image_mask = np.ones((batch_size, 1, 1, 1))
-                    master_image_mask[image_indices[:2]] = 0.0
-                    master_image_mask = torch.from_numpy(master_image_mask).float().to(args.device)
-                    master_image_mask = master_image_mask.expand(-1, 3, 224, 224)
-                    data_dict['master_image'] *= master_image_mask
-                if 'sub_image' in inputs:
-                    sub_image_mask = np.ones((batch_size, 1, 1, 1))
-                    sub_image_mask[image_indices[1:]] = 0.0
-                    sub_image_mask = torch.from_numpy(sub_image_mask).float().to(args.device)
-                    sub_image_mask = sub_image_mask.expand(-1, 3, 224, 224)
-                    data_dict['sub_image'] *= sub_image_mask
+                for image in args.input_dict['image']:
+                    if image in inputs:
+                        image_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        image_mask = np.ones((batch_size, 1, 1, 1))
+                        image_mask[image_mask_indices] = 0.0
+                        image_mask = torch.from_numpy(image_mask).float().to(args.device)
+                        image_mask = image_mask.expand(-1, 3, 224, 224)
+                        data_dict[image] *= image_mask
                     
-                point_indices = gen_random_indices(batch_size, size=3)
-                if 'master_depth' in inputs:
-                    master_point_mask = np.ones((batch_size, 1, 1))
-                    master_point_mask[point_indices[:2]] = 0.0
-                    master_point_mask = torch.from_numpy(master_point_mask).float().to(args.device)
-                    master_point_mask = master_point_mask.expand(-1, 4096, 6)
-                    data_dict['master_depth'] *= master_point_mask
-                if 'sub_depthe' in inputs:
-                    sub_point_mask = np.ones((batch_size, 1, 1))
-                    sub_point_mask[point_indices[1:]] = 0.0
-                    sub_point_mask = torch.from_numpy(sub_point_mask).float().to(args.device)
-                    sub_point_mask = sub_point_mask.expand(-1, 4096, 6)
-                    data_dict['sub_depthe'] *= sub_point_mask
+                for depth in args.input_dict['depth']:
+                    if depth in inputs:
+                        depth_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        depth_mask = np.ones((batch_size, 1, 1))
+                        depth_mask[depth_mask_indices] = 0.0
+                        depth_mask = torch.from_numpy(depth_mask).float().to(args.device)
+                        depth_mask = depth_mask.expand(-1, 4096, 6)
+                        data_dict[depth] *= depth_mask
+                      
         else:
             mask_inputs = set(args.inputs) - set(args.enabled_inputs)
             for input in mask_inputs:
@@ -521,22 +480,21 @@ class TokenFusion(torch.nn.Module):
         image_feats = []
         point_feats = []
         proj_patch_idx = []
-        cluster_centers = {}
         
         # extract local features
-        for i, input in enumerate(['radar','master_image','master_depth','sub_image','sub_depth']):
+        for input in args.inputs:
             if data_dict[input].shape[1]:
-                if i == 1 or i == 3:
-                    image_feats.append(self.process_image(data_dict[input], pos_emb=i))
+                if input in args.input_dict['image']:
+                    image_feats.append(self.process_image(data_dict[input], pos_emb=int(input[-1])))
                 else:
-                    point_feat, xyz = self.process_point(data_dict[input], pos_emb=i)
+                    point_feat, xyz = self.process_point(data_dict[input], pos_emb=int(input[-1]))
                     point_feats.append(point_feat)
                     mas_patch_idx = self.get_img_patch_idx(xyz+data_dict['root_pelvis'][:,None,:].cuda(), 
-                                                           data_dict['trans_mat']['master_image'].cuda(), 
-                                                           'master', data_dict['bbox']['master_image'].cuda())
+                                                           data_dict['trans_mat']['image0'].cuda(), 
+                                                           'image0', data_dict['bbox']['image0'].cuda())
                     sub_patch_idx = self.get_img_patch_idx(xyz+data_dict['root_pelvis'][:,None,:].cuda(), 
-                                                           data_dict['trans_mat']['sub_image'].cuda(), 
-                                                           'sub', data_dict['bbox']['sub_image'].cuda())
+                                                           data_dict['trans_mat']['image1'].cuda(), 
+                                                           'image1', data_dict['bbox']['image1'].cuda())
                     proj_patch_idx.append([mas_patch_idx, sub_patch_idx])
         
         pred_score = []
@@ -574,12 +532,7 @@ class TokenFusion(torch.nn.Module):
         pred_dict = {}
         # forward pass
         pred_dict['pred_score'] = pred_score
-        if args.show_att:
-            features, _, att = self.trans_encoder(features)
-            pred_dict['attention'] = att[-1]
-            pred_dict['cluster_centers'] = cluster_centers
-        else:
-            features = self.trans_encoder(features)
+        features = self.trans_encoder(features)
 
         pred_3d_joints = features[:,:num_joints,:]
         pred_vertices_sub2 = features[:,num_joints:677,:]

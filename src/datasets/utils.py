@@ -6,11 +6,11 @@ import numpy as np
 import plyfile
 
 INTRINSIC = {
-    'master': np.asarray([
+    'image0': np.asarray([
         [969.48345947265625,    0,                  1024.9678955078125],
         [0,                     968.99578857421875, 781.4013671875],
         [0,                     0,                  1]]),
-    'sub': np.asarray([
+    'image1': np.asarray([
         [972.07073974609375,    0,                  1021.4869384765625  ],
         [0,                     971.651123046875,   780.25439453125     ],
         [0,                     0,                  1                   ]
@@ -20,38 +20,44 @@ INTRINSIC = {
 
 class mmBodySequenceLoader(object):
     def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
-                 resource=['radar','master_image','master_depth','sub_image','sub_depth']) -> None:
+                 resource=['image0','image1','depth0','depth1','radar0']) -> None:
         self.seq_path = seq_path
         self.skip_head = skip_head
         self.skip_tail = skip_tail
         self.resource = resource
         # load transformation matrix
         with open(os.path.join(seq_path, 'calib.txt')) as f:
-            self.calib = eval(f.readline())
+            calib = eval(f.readline())
+        self.calib = {
+            'image0':calib['kinect_master'],
+            'image1':calib['kinect_sub'],
+            'depth0':calib['kinect_master'],
+            'depth1':calib['kinect_sub'],
+        }
 
     def __len__(self):
-        return len(os.listdir(os.path.join(self.seq_path, 'radar'))) - self.skip_head - self.skip_tail
+        return len(os.listdir(os.path.join(self.seq_path, 'mesh'))) - self.skip_head - self.skip_tail
 
     def __getitem__(self, idx: int):
         result = {}
-        if 'radar' in self.resource:
-            result['radar'] = np.load(os.path.join(
+        if 'radar0' in self.resource:
+            result['radar0'] = np.load(os.path.join(
                 self.seq_path, 'radar', 'frame_{}.npy'.format(idx+self.skip_head)))
-        if 'master_image' in self.resource:
-            result['master_image'] = cv2.imread(os.path.join(
+        if 'image0' in self.resource:
+            result['image0'] = cv2.imread(os.path.join(
                 self.seq_path, 'image', 'master', 'frame_{}.png'.format(idx+self.skip_head)))
-            result['master_bbox'] = np.load(os.path.join(
+            result['bbox0'] = np.load(os.path.join(
                 self.seq_path, 'bounding_box', 'master', 'frame_{}.npy'.format(idx+self.skip_head)))
-        if 'sub_image' in self.resource:
-            result['sub_image'] = cv2.imread(os.path.join(
+        if 'image1' in self.resource:
+            result['image1'] = cv2.imread(os.path.join(
                 self.seq_path, 'image', 'sub', 'frame_{}.png'.format(idx+self.skip_head)))
-            result['sub_bbox'] = np.load(os.path.join(
+            result['bbox1'] = np.load(os.path.join(
                 self.seq_path, 'bounding_box', 'sub', 'frame_{}.npy'.format(idx+self.skip_head)))
-        if 'master_depth' in self.resource:
-            result['master_depth'] = np.load(os.path.join(
+        if 'depth0' in self.resource:
+            result['depth0'] = np.load(os.path.join(
                 self.seq_path, 'depth_pcl', 'master', 'frame_{}.npy'.format(idx+self.skip_head)))
-        if 'sub_depth' in self.resource:
-            result['sub_depth'] = np.load(os.path.join(
+        if 'depth1' in self.resource:
+            result['depth1'] = np.load(os.path.join(
                 self.seq_path, 'depth_pcl', 'sub', 'frame_{}.npy'.format(idx+self.skip_head)))
         result['mesh'] = np.load(os.path.join(
             self.seq_path, 'mesh', 'frame_{}.npz'.format(idx+self.skip_head)))
@@ -61,7 +67,7 @@ class mmBodySequenceLoader(object):
 
 class HuMManSequenceLoader(object):
     def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
-                 resource=['master_image','master_depth','sub_image','sub_depth'], ori_data=False) -> None:
+                 resource=['image0','image1','depth0','depth1'], ori_data=False) -> None:
         self.seq_path = seq_path
         self.skip_head = skip_head
         self.skip_tail = skip_tail
@@ -69,39 +75,39 @@ class HuMManSequenceLoader(object):
         self.ori_data = ori_data
         # load transformation matrix
         with open(os.path.join(seq_path, 'cameras.json'), 'r', encoding='utf8') as f:
-            self.calib = json.load(f)
-        for k, v in self.calib.items():
-            self.calib[k]['t'] = -np.array(v.pop('T')) @ np.array(v['R'])
-            self.calib[k]['R'] = np.array(v['R']).T
-            self.calib[k]['K'] = np.array(v['K'])
-
+            calib = json.load(f)
+        for k, v in calib.items():
+            calib[k]['t'] = -np.array(v.pop('T')) @ np.array(v['R'])
+            calib[k]['R'] = np.array(v['R']).T
+            calib[k]['K'] = np.array(v['K'])
+        self.calib = {}
+        for i in range(10):
+            self.calib.update({
+                'image{}'.format(i):calib['kinect_color_00{}'.format(i)],
+                'depth{}'.format(i):calib['kinect_depth_00{}'.format(i)],
+            })
     def __len__(self):
         return len(os.listdir(os.path.join(self.seq_path, 'smpl_params'))) - self.skip_head - self.skip_tail
 
     def __getitem__(self, idx: int):
         result = {}
         if self.ori_data:
-            result['master_image'] = cv2.imread(os.path.join(
-                self.seq_path, 'kinect_color', 'kinect_000', '%06d.png' % ((idx+self.skip_head)*6)))
-            result['sub_image'] = cv2.imread(os.path.join(
-                self.seq_path, 'kinect_color', 'kinect_001', '%06d.png' % ((idx+self.skip_head)*6)))
-            result['master_depth'] = cv2.imread(os.path.join(self.seq_path, 'kinect_depth', 'kinect_000', 
-                                            '%06d.png' % ((idx+self.skip_head)*6)), cv2.IMREAD_UNCHANGED)
-            result['sub_depth'] = cv2.imread(os.path.join(self.seq_path, 'kinect_depth', 'kinect_001', 
-                                            '%06d.png' % ((idx+self.skip_head)*6)), cv2.IMREAD_UNCHANGED)
+            for i in [0,3,6,9]:
+                result.update({
+                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'kinect_color', 'kinect_00{}'.format(i), 
+                                                                '%06d.png' % ((idx+self.skip_head)*6))),
+                    'depth{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'kinect_depth', 'kinect_00{}'.format(i),  
+                                                                '%06d.png' % ((idx+self.skip_head)*6)), cv2.IMREAD_UNCHANGED)
+                })
+
         else:
-            if 'master_image' in self.resource:
-                result['master_image'] = cv2.imread(os.path.join(
-                    self.seq_path, 'crop_image', 'kinect_000', '%06d.png' % ((idx+self.skip_head)*6)))
-            if 'sub_image' in self.resource:
-                result['sub_image'] = cv2.imread(os.path.join(
-                    self.seq_path, 'crop_image', 'kinect_001', '%06d.png' % ((idx+self.skip_head)*6)))
-            if 'master_depth' in self.resource:
-                result['master_depth'] = np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect_000', 
-                                                '%06d.npy' % ((idx+self.skip_head)*6)))
-            if 'sub_depth' in self.resource:
-                result['sub_depth'] = np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect_001', 
-                                                '%06d.npy' % ((idx+self.skip_head)*6)))
+            for i in [0,3,6,9]:
+                result.update({
+                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'kinect_00{}'.format(i), 
+                                                                '%06d.png' % ((idx+self.skip_head)*6))),
+                    'depth{}'.format(i):np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect_00{}'.format(i), 
+                                                                '%06d.npy' % ((idx+self.skip_head)*6)))
+                })
         result['mesh'] = np.load(os.path.join(
             self.seq_path, 'smpl_params', '%06d.npz' % ((idx+self.skip_head)*6)))
             
@@ -109,34 +115,53 @@ class HuMManSequenceLoader(object):
 
 class BEHAVESequenceLoader(object):
     def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
-                 resource=['master_image','sub_image','master_depth']) -> None:
+                 resource=['image0','image1','depth0']) -> None:
         self.seq_path = seq_path
         self.skip_head = skip_head
         self.skip_tail = skip_tail
         self.resource = resource
         # load transformation matrix
         with open(os.path.join(seq_path, 'cameras.json'), 'r', encoding='utf8') as f:
-            self.calib = json.load(f)
+            calib = json.load(f)
+        self.calib = {}
+        for i in range(4):
+            self.calib.update({
+                'image{}'.format(i):calib['kinect{}'.format(i)],
+                'depth{}'.format(i):calib['kinect{}'.format(i)],
+            })
 
     def __len__(self):
         return len(os.listdir(os.path.join(self.seq_path, 'smpl_params'))) - self.skip_head - self.skip_tail
     
     def __getitem__(self, idx: int):
         result = {}
-        if 'master_image' in self.resource:
-            result['master_image'] = cv2.imread(os.path.join(
-                self.seq_path, 'crop_image', 'kinect0', '{}.png'.format(idx+self.skip_head)))
-        if 'sub_image' in self.resource:
-            result['sub_image'] = cv2.imread(os.path.join(
-                self.seq_path, 'crop_image', 'kinect1', '{}.png'.format(idx+self.skip_head)))
-        if 'master_depth' in self.resource:
-            result['master_depth'] = np.load(os.path.join(self.seq_path, 'depth_pcl', 
-                                            '{}.npy'.format(idx+self.skip_head)))
+        for i in range(4):
+            result.update({
+                'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'kinect{}'.format(i), 
+                                                            '{}.png'.format(idx+self.skip_head))),
+                'depth{}'.format(i):np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect{}'.format(i), 
+                                                            '{}.npy'.format(idx+self.skip_head)))
+            })
         result['mesh'] = np.load(os.path.join(
-            self.seq_path, 'smpl_params', '{}.npz'.format(idx+self.skip_head)))
+            self.seq_path, 'mesh', '{}.npz'.format(idx+self.skip_head)))
             
         return result
 
+
+def conv_ply_2_arr(ply_path, return_rgb=True):
+    plydata = plyfile.PlyData.read(ply_path)
+    x = plydata['vertex']['x']
+    y = plydata['vertex']['y']
+    z = plydata['vertex']['z']
+    pcl = np.column_stack((x, y, z))
+    if return_rgb:
+        r = plydata['vertex']['red'] / 255
+        g = plydata['vertex']['green'] / 255
+        b = plydata['vertex']['blue'] / 255
+        pcl = np.column_stack((x, y, z, r, g, b))
+    return pcl
+    
+    
 def copy2cpu(tensor):
     if isinstance(tensor, np.ndarray):
         return tensor
@@ -145,8 +170,8 @@ def copy2cpu(tensor):
 
 def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=np.array([1536,2048])):
     if trans_mat is not None:
-        pcl = (pcl - trans_mat['t']) @ trans_mat['R']
-    intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['master']
+        pcl = (pcl - trans_mat['t']) @ np.array(trans_mat['R']).reshape(3, 3)
+    intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['image0']
     pcl_2d = ((pcl/pcl[:,2:3]) @ intrinsic.T)[:,:2]
     pcl_2d = np.floor(pcl_2d).astype(int)
     pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
@@ -163,7 +188,7 @@ def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=torch.tens
     """
     if trans_mat is not None:
         pcl = (pcl - trans_mat[:,None,:3,3]) @ trans_mat[:,:3,:3]
-    intrinsic = intrinsic if intrinsic is not None else INTRINSIC['master']
+    intrinsic = intrinsic if intrinsic is not None else INTRINSIC['image0']
     pcl_2d = ((pcl/pcl[:,:,2:3]) @ torch.tensor(intrinsic).T.float().cuda())[:,:,:2]
     pcl_2d = torch.floor(pcl_2d).long()
     pcl_2d[:,:,[0,1]] = pcl_2d[:,:,[1,0]]
@@ -193,22 +218,20 @@ def filter_pcl(bounding_pcl: np.ndarray, target_pcl: np.ndarray, bound: float = 
     """
     Filter out the pcls of pcl_b that is not in the bounding_box of pcl_a
     """
-    upper_bound = bounding_pcl[:, :3].max(axis=0) + bound
-    lower_bound = bounding_pcl[:, :3].min(axis=0) - bound
+    upper_bound = np.max(bounding_pcl[:, :3], axis=0) + bound
+    lower_bound = np.min(bounding_pcl[:, :3], axis=0) - bound
     if facing_up:
         lower_bound[height_axis] += offset
     else:
         upper_bound[height_axis] -= offset
-
-    mask_x = (target_pcl[:, 0] >= lower_bound[0]) & (
-        target_pcl[:, 0] <= upper_bound[0])
-    mask_y = (target_pcl[:, 1] >= lower_bound[1]) & (
-        target_pcl[:, 1] <= upper_bound[1])
-    mask_z = (target_pcl[:, 2] >= lower_bound[2]) & (
-        target_pcl[:, 2] <= upper_bound[2])
-    index = mask_x & mask_y & mask_z
+    
+    # Compute the mask
+    mask_x = np.logical_and(target_pcl[:, 0] >= lower_bound[0], target_pcl[:, 0] <= upper_bound[0])
+    mask_y = np.logical_and(target_pcl[:, 1] >= lower_bound[1], target_pcl[:, 1] <= upper_bound[1])
+    mask_z = np.logical_and(target_pcl[:, 2] >= lower_bound[2], target_pcl[:, 2] <= upper_bound[2])
+    index = np.logical_and(np.logical_and(mask_x, mask_y), mask_z)
+    
     return target_pcl[index]
-
 
 def pad_pcl(pcl, num_points, return_choices=False):
     if pcl.shape[0] > num_points:
@@ -230,7 +253,7 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
     # transform the joints to camera coordinate
     if trans_mat is not None:
         joints = (joints - trans_mat['t']) @ trans_mat['R']
-    intrinsic = intrinsic if intrinsic is not None else INTRINSIC['master']
+    intrinsic = intrinsic if intrinsic is not None else INTRINSIC['image0']
     joint_max = joints.max(axis=0) + margin
     joint_min = joints.min(axis=0) - margin
     # get 3d bounding box from joints

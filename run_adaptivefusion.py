@@ -141,17 +141,15 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
             verts_line_colors.append(1 + thres - norm_attention_to_show[i] * np.asarray((200, 208, 255)) / 255)
 
     def draw_pcl_att_map(pcl_input):
-        if pcl_input is 'radar':
-            cam = 'master'
-            image = 'master_image'
+        if pcl_input is 'radar0':
+            image = 'image0'
         else:
-            cam = pcl_input[:-6]
-            image = '{}_image'.format(cam)
+            image = 'image{}'.format(pcl_input[-1])
         # project points to the image
         orig_img = data_dict['orig_img'][image][idx]
-        pcl_2d = project_pcl(data_dict[pcl_input][idx][:,:3] + gt_pelvis, trans_mat[image], intrinsic=INTRINSIC[cam])
+        pcl_2d = project_pcl(data_dict[pcl_input][idx][:,:3] + gt_pelvis, trans_mat[image], intrinsic=INTRINSIC[image])
         # project cluster centers to the image
-        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis, trans_mat[image], intrinsic=INTRINSIC[cam])
+        center_2d = project_pcl(cluster_centers[pcl_input][idx] + gt_pelvis, trans_mat[image], intrinsic=INTRINSIC[image])
         blank = np.zeros_like(orig_img[:,:,:1])
         start_idx = 655 + 49 * args.inputs.index(pcl_input)
         # sort the weight
@@ -166,14 +164,14 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
             for j in range(-1, 2):
                 img_with_cluster[pcl_2d[:,0]+i, pcl_2d[:,1]+j] = [0, 255, 0]
         # crop the image area of people
-        img_with_cluster = crop_image(pred_joints+gt_pelvis, img_with_cluster, trans_mat[image], margin=0.3, square=True, cam=cam)
+        img_with_cluster = crop_image(pred_joints+gt_pelvis, img_with_cluster, trans_mat[image], margin=0.3, square=True, intrinsic=INTRINSIC[image])
         img_with_cluster = cv2.resize(img_with_cluster, (224, 224))
         return img_with_cluster
     
     def draw_img_att_map(img_input):
         # crop the image area of people
         croped_img = crop_image(joints=pred_joints+gt_pelvis, image=data_dict['orig_img'][img_input][idx], 
-                                trans_mat=trans_mat[img_input], margin=0.3, square=True, cam=img_input[:-6])
+                                trans_mat=trans_mat[img_input], margin=0.3, square=True, intrinsic=INTRINSIC[img_input])
         croped_img = cv2.resize(croped_img, (224, 224))
         grid_width = 224 // 7
         blank = np.zeros((224, 224, 1), dtype=np.uint8)
@@ -190,12 +188,12 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
     
     img_to_show = []
     # draw image attention map
-    for img_input in ['master_image', 'sub_image']:
+    for img_input in args.input_dict['image']:
         if img_input in args.inputs:
             img_to_show.append(draw_img_att_map(img_input))
     
     # draw point attention map
-    for pcl_input in ['master_depth', 'sub_depth', 'radar']:
+    for pcl_input in args.input_dict['depth'] + args.input_dict['radar']:
         if pcl_input in args.inputs:
             img_to_show.append(draw_pcl_att_map(pcl_input))
             
@@ -407,21 +405,24 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
     for i in range(len(pred_vertices)):
         print('frame_id:', i)
         if not args.show_att:
-            res = dict(
-                radar_pcl = dict(
-                    # mesh = pcl2box(data_dict['radar'][i][:,:3]) if data_dict['radar'].shape[1] else None,
-                    pcl = data_dict['radar'][i][:,:3] if data_dict['radar'].shape[1] else None,
+            depth_colors = dict(
+                depth1=np.asarray([59, 170, 235]) /255,
+                depth0=np.asarray([245, 157, 86]) /255,
+                depth2=np.asarray([0, 204, 0]) /255,
+                depth3=np.asarray([202, 139, 245]) /255,
+            )
+            res = {}
+            res.update({
+                depth:dict(
+                    pcl = data_dict[depth][i][:,:3],
+                    color = depth_colors[depth],
+                ) for depth in args.input_dict['depth']
+            })
+            res.update(dict(
+                radar0 = dict(
+                    # mesh = pcl2box(data_dict['radar0'][i][:,:3]) if 'radar0' in args.inputs else None,
+                    pcl = data_dict['radar0'][i][:,:3] if 'radar0' in args.inputs else None,
                     color = [0,0.8,0],
-                ),
-                master_pcl = dict(
-                    # mesh = pcl2box(data_dict['master_depth'][i][:,:3]) if data_dict['master_depth'].shape[1] else None,
-                    pcl = data_dict['master_depth'][i][:,:3] if data_dict['master_depth'].shape[1] else None,
-                    color = np.asarray([59, 170, 235]) /255,
-                ),
-                sub_pcl = dict(
-                    # mesh = pcl2box(data_dict['sub_depth'][i][:,:3]) if data_dict['sub_depth'].shape[1] else None,
-                    pcl = data_dict['sub_depth'][i][:,:3] if data_dict['sub_depth'].shape[1] else None,
-                    color = np.asarray([245, 157, 86]) /255,
                 ),
                 pred_smpl = dict(
                     mesh = [copy2cpu(pred_vertices)[i], copy2cpu(face)],
@@ -431,7 +432,7 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
                 #     mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
                 #     color = np.asarray([235, 189, 191]) / 255,
                 # ),
-            )
+                ))
         else:
             for k, v in cluster_centers.items():
                 cluster_centers[k] = copy2cpu(v)
@@ -449,6 +450,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
 
     per_joint_err = []
     per_vertex_err = []
+    per_pampjpe = []
 
     if not args.train:
         snapshot_path = os.path.join(args.output_dir, 'snapshot', args.test_scene)
@@ -489,6 +491,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
 
             per_joint_err.append(torch.norm((pred_3d_joints - gt_3d_joints), dim=-1))
             per_vertex_err.append(torch.norm((pred_vertices - gt_vertices), dim=-1))
+            per_pampjpe.append(error_joints_pa)
 
             if len(error_vertices)>0:
                 mPVE.update(np.mean(error_vertices))
@@ -539,6 +542,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             os.makedirs(output_path)
         j_err = copy2cpu(torch.vstack(per_joint_err))
         v_err = copy2cpu(torch.vstack(per_vertex_err))
+        pa_err = np.hstack(per_pampjpe)
         np.save(os.path.join(output_path, "per_joint_err"), j_err)
         np.save(os.path.join(output_path, "per_vertex_err"), v_err)
         print("mean joint err (cm):", np.mean(j_err)*100)
@@ -550,6 +554,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             f.write("\nmean vertex error: " + str(np.mean(v_err)*100))
             f.write("\nmax joint error: " + str(np.mean(np.max(j_err, axis=1), axis=0)*100))
             f.write("\nmax vertex error: " + str(np.mean(np.max(v_err, axis=1), axis=0)*100))
+            f.write("\npampjpe: " + str(np.mean(pa_err)*100))
 
         # write errors to the excel
         sheet_loc_dict = {
@@ -604,9 +609,12 @@ def main(args):
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
     args.inputs = args.inputs.replace(' ','').split(',')
+    args.input_dict = {}
+    for m in ['image', 'depth', 'radar']:
+        args.input_dict[m] = [i for i in args.inputs if m in i]
     if args.model == 'TokenFusion':
         args.enabled_inputs = args.inputs
-        args.inputs = ['radar','master_image','master_depth','sub_image','sub_depth']
+        args.inputs = ['image0','image1','depth0','depth1','radar0']
     if not args.inputs:
         raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
@@ -733,7 +741,6 @@ def main(args):
         for iter_layer in range(4):
             _model.trans_encoder[-1].bert.encoder.layer[iter_layer].attention.self.output_attentions = True
         setattr(_model.trans_encoder[-1].config,'device', args.device)
-        args.data_path = '/home/nesc525/drivers/0/dataset'
 
     _model.to(args.device)
     logger.info("Training parameters %s", args)
@@ -777,7 +784,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='mmBodyDataset')
     parser.add_argument('--num_points', type=int, default=1024)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
-    parser.add_argument('--inputs', type=str, default='radar,master_image,master_depth,sub_image,sub_depth', help='input data')
+    parser.add_argument('--inputs', type=str, default='image0,image1,depth0,depth1,radar', help='input data')
     parser.add_argument('--trans_coor_to_cam', action="store_true")
     #########################################################
     # Loading/saving checkpoints
@@ -863,7 +870,6 @@ def parse_args():
     parser.add_argument('--wo_local_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
-    parser.add_argument('--single_input_ratio', type=float, default=0.)
     parser.add_argument('--calib_emb', action="store_true")
     parser.add_argument('--shuffle_inputs', action="store_true")
     parser.add_argument('--num_clusters', type=int, default=49)
