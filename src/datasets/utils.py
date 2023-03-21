@@ -91,23 +91,13 @@ class HuMManSequenceLoader(object):
 
     def __getitem__(self, idx: int):
         result = {}
-        if self.ori_data:
-            for i in [0,3,6,9]:
-                result.update({
-                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'kinect_color', 'kinect_00{}'.format(i), 
-                                                                '%06d.png' % ((idx+self.skip_head)*6))),
-                    'depth{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'kinect_depth', 'kinect_00{}'.format(i),  
-                                                                '%06d.png' % ((idx+self.skip_head)*6)), cv2.IMREAD_UNCHANGED)
-                })
-
-        else:
-            for i in [0,3,6,9]:
-                result.update({
-                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'kinect_00{}'.format(i), 
-                                                                '%06d.png' % ((idx+self.skip_head)*6))),
-                    'depth{}'.format(i):np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect_00{}'.format(i), 
-                                                                '%06d.npy' % ((idx+self.skip_head)*6)))
-                })
+        for i in [0,3,6,9]:
+            result.update({
+                'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'kinect_00{}'.format(i), 
+                                                            '%06d.png' % ((idx+self.skip_head)*6))),
+                'depth{}'.format(i):np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect_00{}'.format(i), 
+                                                            '%06d.npy' % ((idx+self.skip_head)*6)))
+            })
         result['mesh'] = np.load(os.path.join(
             self.seq_path, 'smpl_params', '%06d.npz' % ((idx+self.skip_head)*6)))
             
@@ -125,10 +115,11 @@ class BEHAVESequenceLoader(object):
             calib = json.load(f)
         self.calib = {}
         for i in range(4):
-            self.calib.update({
-                'image{}'.format(i):calib['kinect{}'.format(i)],
-                'depth{}'.format(i):calib['kinect{}'.format(i)],
-            })
+            if 'image{}'.format(i) in self.resource:
+                self.calib.update({
+                    'image{}'.format(i):calib['kinect{}'.format(i)],
+                    'depth{}'.format(i):calib['kinect{}'.format(i)],
+                })
 
     def __len__(self):
         return len(os.listdir(os.path.join(self.seq_path, 'smpl_params'))) - self.skip_head - self.skip_tail
@@ -136,12 +127,48 @@ class BEHAVESequenceLoader(object):
     def __getitem__(self, idx: int):
         result = {}
         for i in range(4):
-            result.update({
-                'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'kinect{}'.format(i), 
-                                                            '{}.png'.format(idx+self.skip_head))),
-                'depth{}'.format(i):np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect{}'.format(i), 
-                                                            '{}.npy'.format(idx+self.skip_head)))
-            })
+            if 'image{}'.format(i) in self.resource:
+                result.update({
+                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'kinect{}'.format(i), 
+                                                                '{}.png'.format(idx+self.skip_head))),
+                })
+            if 'depth{}'.format(i) in self.resource:
+                result.update({
+                    'depth{}'.format(i):np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect{}'.format(i), 
+                                                                '{}.npy'.format(idx+self.skip_head)))
+                })
+        result['mesh'] = np.load(os.path.join(
+            self.seq_path, 'mesh', '{}.npz'.format(idx+self.skip_head)))
+            
+        return result
+
+class Human36MSequenceLoader(object):
+    def __init__(self, seq_path: str, skip_head: int = 0, skip_tail: int = 0, 
+                 resource=['image1','image2','image3','image4']) -> None:
+        self.seq_path = seq_path
+        self.skip_head = skip_head
+        self.skip_tail = skip_tail
+        self.resource = resource
+        # load transformation matrix
+        with open(os.path.join(seq_path, 'cameras.json'), 'r', encoding='utf8') as f:
+            calib = json.load(f)
+        self.calib = {}
+        for i in range(1,5):
+            if 'image{}'.format(i) in self.resource:
+                self.calib.update({
+                    'image{}'.format(i):calib['camera{}'.format(i)],
+                })
+    def __len__(self):
+        return len(os.listdir(os.path.join(self.seq_path, 'mesh'))) - self.skip_head - self.skip_tail
+
+    def __getitem__(self, idx: int):
+        result = {}
+        for i in range(1,5):
+            if 'image{}'.format(i) in self.resource:
+                result.update({
+                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'camera{}'.format(i), 
+                                                                '{}.png'.format(idx+self.skip_head))),
+                })
         result['mesh'] = np.load(os.path.join(
             self.seq_path, 'mesh', '{}.npz'.format(idx+self.skip_head)))
             
@@ -168,7 +195,7 @@ def copy2cpu(tensor):
     return tensor.detach().cpu().numpy()
 
 
-def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=np.array([1536,2048])):
+def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048]):
     if trans_mat is not None:
         pcl = (pcl - trans_mat['t']) @ np.array(trans_mat['R']).reshape(3, 3)
     intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['image0']
@@ -176,13 +203,14 @@ def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=np.array([1536,2
     pcl_2d = np.floor(pcl_2d).astype(int)
     pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
     # filter out the points exceeding the image size
+    image_size = np.array(image_size)
     pcl_2d = np.where(pcl_2d<image_size-1, pcl_2d, image_size-1)
     pcl_2d = np.where(pcl_2d>0, pcl_2d, 0)
     
     return pcl_2d
 
 
-def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=torch.tensor([1536,2048])):
+def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048]):
     """
     Project pcl to the image plane
     """
@@ -192,7 +220,7 @@ def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=torch.tens
     pcl_2d = ((pcl/pcl[:,:,2:3]) @ torch.tensor(intrinsic).T.float().cuda())[:,:,:2]
     pcl_2d = torch.floor(pcl_2d).long()
     pcl_2d[:,:,[0,1]] = pcl_2d[:,:,[1,0]]
-    image_size = image_size.cuda()
+    image_size = torch.tensor(image_size).cuda()
     pcl_2d = torch.where(pcl_2d<image_size-1, pcl_2d, image_size-1)
     pcl_2d = torch.where(pcl_2d>0, pcl_2d, 0)
     return pcl_2d

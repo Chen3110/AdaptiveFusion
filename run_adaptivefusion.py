@@ -432,7 +432,7 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
                 #     mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
                 #     color = np.asarray([235, 189, 191]) / 255,
                 # ),
-                ))
+            ))
         else:
             for k, v in cluster_centers.items():
                 cluster_centers[k] = copy2cpu(v)
@@ -782,10 +782,13 @@ def parse_args():
     parser.add_argument('--skip_head', type=int, default=0)
     parser.add_argument('--skip_tail', type=int, default=0)
     parser.add_argument('--dataset', type=str, default='mmBodyDataset')
-    parser.add_argument('--num_points', type=int, default=1024)
+    parser.add_argument('--num_points', type=int, default=4096)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
     parser.add_argument('--inputs', type=str, default='image0,image1,depth0,depth1,radar', help='input data')
     parser.add_argument('--trans_coor_to_cam', action="store_true")
+    parser.add_argument("--mesh_type", default='smplx', type=str, help="smplx or smpl") 
+    parser.add_argument('--mask_ratio', type=float, default=0.3)
+    parser.add_argument('--mix_data', action="store_true")
     #########################################################
     # Loading/saving checkpoints
     #########################################################
@@ -838,7 +841,6 @@ def parse_args():
                         help="The Image Feature Dimension.")   
     parser.add_argument("--which_gcn", default='0,0,1', type=str, 
                         help="which encoder block to have graph conv. Encoder1, Encoder2, Encoder3. Default: only Encoder3 has graph conv") 
-    parser.add_argument("--mesh_type", default='smplx', type=str, help="smplx or smpl") 
     parser.add_argument("--interm_size_scale", default=2, type=int)
     parser.add_argument("--num_cluster_feat", default=32, type=int)
     #########################################################
@@ -859,7 +861,6 @@ def parse_args():
     parser.add_argument('--max_num_batch', type=int, default=10000)
     parser.add_argument('--save_snapshot', action="store_true")
     parser.add_argument('--output_dim', type=int, default=3)
-    parser.add_argument('--mask_ratio', type=float, default=0.3)
     parser.add_argument('--points_w_image_feat', action="store_true")
     parser.add_argument('--radar_only', action="store_true")
     parser.add_argument('--image_only', action="store_true")

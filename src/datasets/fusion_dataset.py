@@ -215,14 +215,13 @@ class HuMManDataset(mmBodyDataset):
         return result
 
 
-class BEHAVEDataset(HuMManDataset):
+class BEHAVEDataset(mmBodyDataset):
     def __init__(self, args, **kwargs):
         self.normalize_img = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.args = args
         self.img_res = 224
         self.data_path = op.join(args.data_path, 'train') if args.train else op.join(args.data_path, 'test')
         self.resource = args.inputs
-        self.smpl_model = kwargs.get('smpl_model', SMPL())
         self.init_index_map()
         
     def init_index_map(self):
@@ -276,3 +275,26 @@ class BEHAVEDataset(HuMManDataset):
         result['vert_mask'] = vert_mask
 
         return result
+    
+
+class Human36MDataset(BEHAVEDataset):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        
+    def init_index_map(self):
+        self.index_map = [0,]
+        if self.args.mix_data:
+            self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path)]
+        else:
+            self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p[0]=='s']
+        self.seq_paths.sort()
+        if self.args.mix_data:
+            self.seq_paths = self.seq_paths[::2]
+        
+        self.seq_loaders = {}
+        for path in self.seq_paths:
+            # init result loader, reindex
+            seq_loader = Human36MSequenceLoader(path, resource=self.resource)
+            self.seq_loaders.update({path:seq_loader})
+            self.index_map.append(self.index_map[-1] + len(seq_loader))
+    
