@@ -62,8 +62,11 @@ class mmBodyDataset():
             return torch.zeros((padding_points, 6)).float()
         if mask:
             # mask points
-            indices = np.random.choice(pcl.shape[0], 100)
-            pcl = pcl[indices]
+            limb_joints = [4, 5, 7, 8, 10, 11, 15, 18, 19, 20, 21]
+            mask_joints = gen_random_indices(max_size=len(limb_joints), min_size=2)
+            dists = np.minimum.reduce([np.linalg.norm(pcl[:,:3] - joints[limb_joints[i]], axis=1) for i in mask_joints])
+            sele_indices = dists > 0.2
+            pcl = pcl[sele_indices]
         # normalize pcl
         pcl[:,:3] -= joints[pelvis_idx]
         # padding pcl
@@ -74,7 +77,7 @@ class mmBodyDataset():
     def gen_mask(self, num_mask, mask_ratio):
         mask = np.ones((num_mask))
         if self.args.train:
-            indices = gen_random_indices(num_mask, random_ratio=mask_ratio)
+            indices = gen_random_indices(num_mask, max_ratio=mask_ratio)
             mask[indices] = 0.0
         return torch.from_numpy(mask).float()
     
@@ -108,13 +111,8 @@ class mmBodyDataset():
             bbox[image] = frame['bbox{}'.format(image[-1])].reshape(-1)
 
         # process depth pcl
-        if self.args.train:
-            random_value = np.random.rand()
-            mask = True if random_value < self.args.mask_ratio else False
-        else:
-            mask = False
         for depth in self.args.input_dict['depth']:
-            result[depth] = self.process_pcl(frame[depth], joints, 4096, mask=mask, pelvis_idx=pelvis_idx)
+            result[depth] = self.process_pcl(frame[depth], joints, self.args.num_points, mask=self.args.mask_limbs, pelvis_idx=pelvis_idx)
             trans_mat[depth] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[depth])).float()
             
         # process radar pcl

@@ -101,16 +101,10 @@ class AdaptiveFusion(torch.nn.Module):
             inputs = args.inputs.copy()
             # eliminate random modalities
             input_elim_indices = list(range(len(inputs)))
-            if args.image_only:
-                input_elim_indices.remove(inputs.index('image0'))
-            elif args.depth_only:
-                input_elim_indices.remove(inputs.index('depth0'))
-            elif args.radar_only:
-                input_elim_indices.remove(inputs.index('radar0'))
-            elif args.full_modalities:
+            if args.full_modalities:
                 input_elim_indices = []
             else:
-                input_elim_indices = gen_random_indices(max_random_num=len(inputs))
+                input_elim_indices = gen_random_indices(max_size=len(inputs))
             for i in input_elim_indices:
                 data_dict[inputs[i]] = torch.Tensor([[]])
                 inputs[i] = ''
@@ -132,7 +126,7 @@ class AdaptiveFusion(torch.nn.Module):
                         depth_mask = np.ones((batch_size, 1, 1))
                         depth_mask[depth_mask_indices] = 0.0
                         depth_mask = torch.from_numpy(depth_mask).float().to(args.device)
-                        depth_mask = depth_mask.expand(-1, 4096, 6)
+                        depth_mask = depth_mask.expand(-1, args.num_points, 6)
                         data_dict[depth] *= depth_mask
                         
         global_feats = []
@@ -274,13 +268,7 @@ class DeepFusion(torch.nn.Module):
         if is_train:
             inputs = args.inputs.copy()
             # eliminate random modalities
-            input_elim_indices = gen_random_indices(max_random_num=len(inputs))
-            if args.image_only:
-                input_elim_indices = range(len(inputs)).pop(inputs.index('image0'))
-            if args.depth_only:
-                input_elim_indices = range(len(inputs)).pop(inputs.index('depth0'))
-            if args.radar_only:
-                input_elim_indices = range(len(inputs)).pop(inputs.index('radar0'))
+            input_elim_indices = gen_random_indices(max_size=len(inputs))
             if args.full_modalities:
                 input_elim_indices = []
             for i in input_elim_indices:
@@ -439,13 +427,7 @@ class TokenFusion(torch.nn.Module):
         if is_train:
             inputs = args.inputs.copy()
             # eliminate random modalities
-            input_elim_indices = gen_random_indices(max_random_num=len(inputs))
-            if args.image_only:
-                input_elim_indices = range(len(inputs)).pop(inputs.index('image0'))
-            if args.depth_only:
-                input_elim_indices = range(len(inputs)).pop(inputs.index('depth0'))
-            if args.radar_only:
-                input_elim_indices = range(len(inputs)).pop(inputs.index('radar0'))
+            input_elim_indices = gen_random_indices(max_size=len(inputs))
             if args.full_modalities:
                 input_elim_indices = []
             for i in input_elim_indices:

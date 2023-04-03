@@ -428,10 +428,10 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
                     mesh = [copy2cpu(pred_vertices)[i], copy2cpu(face)],
                     color = np.asarray([179, 230, 213]) /255
                 ),
-                # label_smpl = dict(
-                #     mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
-                #     color = np.asarray([235, 189, 191]) / 255,
-                # ),
+                label_smpl = dict(
+                    mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
+                    color = np.asarray([235, 189, 191]) / 255,
+                ),
             ))
         else:
             for k, v in cluster_centers.items():
@@ -749,8 +749,6 @@ def main(args):
 
     if args.train==True:
         train_size = int(0.9 * len(dataset))
-        if args.radar_only or args.image_only or args.depth_only:
-            train_size = int(len(dataset)/32)
         eval_size = len(dataset) - train_size
         dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
         train_dataloader = make_data_loader(args, dataset_train, args.distributed, is_train=True, 
@@ -788,6 +786,7 @@ def parse_args():
     parser.add_argument('--trans_coor_to_cam', action="store_true")
     parser.add_argument("--mesh_type", default='smplx', type=str, help="smplx or smpl") 
     parser.add_argument('--mask_ratio', type=float, default=0.3)
+    parser.add_argument('--mask_limbs', action="store_true")
     parser.add_argument('--mix_data', action="store_true")
     #########################################################
     # Loading/saving checkpoints
@@ -862,9 +861,6 @@ def parse_args():
     parser.add_argument('--save_snapshot', action="store_true")
     parser.add_argument('--output_dim', type=int, default=3)
     parser.add_argument('--points_w_image_feat', action="store_true")
-    parser.add_argument('--radar_only', action="store_true")
-    parser.add_argument('--image_only', action="store_true")
-    parser.add_argument('--depth_only', action="store_true")
     parser.add_argument('--full_modalities', action="store_true")
     parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--wo_MMM', action="store_true")

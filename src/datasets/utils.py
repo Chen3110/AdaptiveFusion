@@ -393,13 +393,12 @@ def rodrigues_2_rot_mat(rvecs):
 
     return R.reshape(batch_size, -1)
 
-def gen_random_indices(max_random_num, min_random_num=0, random_ratio=1., random_num=True, size=0):
+def gen_random_indices(max_size, min_size=0, max_ratio=1., includ_right=False, size=None):
     # generate x% of max_random_num random indices
-    pb = np.random.rand() if random_num else 1.
-    num_indices = np.floor(pb*random_ratio*(max_random_num-min_random_num)) if not size else size
-    if num_indices >= max_random_num:
-        num_indices = max_random_num
-    indices = np.random.choice(np.arange(min_random_num, max_random_num), replace=False, size=int(num_indices))
+    if size is None:
+        max_size_ = np.ceil(max_ratio*max_size) + 1 if includ_right else np.ceil(max_ratio*max_size)
+        size = np.random.randint(min_size, max_size_)
+    indices = np.random.choice(np.arange(max_size), replace=False, size=int(size))
     return np.sort(indices)
 
 def mosh_pose_transform(trans, root_orient, root_joint, trans_mat):
