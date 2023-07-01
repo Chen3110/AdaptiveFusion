@@ -3,7 +3,18 @@ import time
 import open3d as o3d
 import numpy as np
 
-
+def o3d_plot(o3d_items: list, show_coord=True, **kwargs):
+    if show_coord:
+        _items = o3d_items + [o3d_coord(**kwargs)]
+    else:
+        _items = o3d_items
+    view = o3d.visualization.VisualizerWithKeyCallback()
+    view.create_window()
+    for item in _items:
+        view.add_geometry(item)
+    view.run()
+    
+    
 def o3d_pcl(pcl: np.ndarray = None, color: list = None, colors: list = None, last_update=None):
     _pcl = last_update
     if _pcl is None:

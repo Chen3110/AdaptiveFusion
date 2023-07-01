@@ -254,16 +254,17 @@ def filter_pcl(bounding_pcl: np.ndarray, target_pcl: np.ndarray, bound: float = 
         upper_bound[height_axis] -= offset
     
     # Compute the mask
-    mask_x = np.logical_and(target_pcl[:, 0] >= lower_bound[0], target_pcl[:, 0] <= upper_bound[0])
-    mask_y = np.logical_and(target_pcl[:, 1] >= lower_bound[1], target_pcl[:, 1] <= upper_bound[1])
-    mask_z = np.logical_and(target_pcl[:, 2] >= lower_bound[2], target_pcl[:, 2] <= upper_bound[2])
-    index = np.logical_and(np.logical_and(mask_x, mask_y), mask_z)
+    index = np.all((lower_bound <= target_pcl[:,:3]) & (target_pcl[:,:3] <= upper_bound), axis=-1)
     
     return target_pcl[index]
 
-def pad_pcl(pcl, num_points, return_choices=False):
+def pad_pcl(pcl, num_points=0, return_choices=False, ratio=None):
+    if ratio is not None:
+        num_points = int(pcl.shape[0] * ratio)
     if pcl.shape[0] > num_points:
         r = np.random.choice(pcl.shape[0], size=num_points, replace=False)
+    elif not pcl.shape[0]:
+        return np.empty(shape=pcl.shape)
     else:
         repeat, residue = num_points // pcl.shape[0], num_points % pcl.shape[0]
         r = np.random.choice(pcl.shape[0], size=residue, replace=False)
@@ -393,12 +394,22 @@ def rodrigues_2_rot_mat(rvecs):
 
     return R.reshape(batch_size, -1)
 
-def gen_random_indices(max_size, min_size=0, max_ratio=1., includ_right=False, size=None):
+def gen_random_indices(num_indices, size=None, min_size=None, max_size=None, min_ratio=0., max_ratio=1., includ_right=False):
     # generate x% of max_random_num random indices
+    if num_indices <= 0:
+        return []
     if size is None:
-        max_size_ = np.ceil(max_ratio*max_size) + 1 if includ_right else np.ceil(max_ratio*max_size)
+        if min_size is None:
+            min_size = min_ratio*num_indices
+        else:
+            min_size = max(0, min_size)
+        if max_size is None:
+            max_size = max_ratio*num_indices
+        else:
+            max_size = min(num_indices, max_size)
+        max_size_ = np.ceil(max_size) + 1 if includ_right else np.ceil(max_size)
         size = np.random.randint(min_size, max_size_)
-    indices = np.random.choice(np.arange(max_size), replace=False, size=int(size))
+    indices = np.random.choice(np.arange(num_indices), replace=False, size=int(size))
     return np.sort(indices)
 
 def mosh_pose_transform(trans, root_orient, root_joint, trans_mat):
@@ -407,3 +418,20 @@ def mosh_pose_transform(trans, root_orient, root_joint, trans_mat):
     orient_mat = trans_mat['R'] @ cv2.Rodrigues(root_orient)[0]
     new_orient = cv2.Rodrigues(orient_mat)[0]
     return new_trans, new_orient
+
+def find_points_within_circle(pcl, center, dist, return_ind=False):
+    dists = np.linalg.norm(pcl[:,:3] - center, axis=1)
+    sele_indices = dists <= dist
+    sel_pcl = pcl[sele_indices]
+    if return_ind:
+        return sel_pcl, sele_indices
+    return sel_pcl
+
+def find_points_within_cuboid(pcl, center, size, return_ind=False):
+    mins = center - size / 2
+    maxs = center + size / 2
+    mask = np.all((mins <= pcl[:,:3]) & (pcl[:,:3] <= maxs), axis=-1)
+    sel_pcl = pcl[mask]
+    if return_ind:
+        return sel_pcl, mask
+    return sel_pcl

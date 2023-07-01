@@ -289,8 +289,8 @@ class Mesh(object):
         return x
 
 class SMPLX(BodyModel):
-    def __init__(self, **kwargs):
-        super().__init__(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, num_expressions=0, **kwargs)
+    def __init__(self, num_betas=16, **kwargs):
+        super().__init__(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=num_betas, num_expressions=0, **kwargs)
 
     def forward(self, pose_body, betas, use_rodrigues=True):
         device = pose_body.device

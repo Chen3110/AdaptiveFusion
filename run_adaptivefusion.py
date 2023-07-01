@@ -406,8 +406,8 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
         print('frame_id:', i)
         if not args.show_att:
             depth_colors = dict(
-                depth1=np.asarray([59, 170, 235]) /255,
                 depth0=np.asarray([245, 157, 86]) /255,
+                depth1=np.asarray([59, 170, 235]) /255,
                 depth2=np.asarray([0, 204, 0]) /255,
                 depth3=np.asarray([202, 139, 245]) /255,
             )
@@ -609,12 +609,12 @@ def main(args):
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
     args.inputs = args.inputs.replace(' ','').split(',')
-    args.input_dict = {}
-    for m in ['image', 'depth', 'radar']:
-        args.input_dict[m] = [i for i in args.inputs if m in i]
     if args.model == 'TokenFusion':
         args.enabled_inputs = args.inputs
         args.inputs = ['image0','image1','depth0','depth1','radar0']
+    args.input_dict = {}
+    for m in ['image', 'depth', 'radar']:
+        args.input_dict[m] = [i for i in args.inputs if m in i]
     if not args.inputs:
         raise RuntimeError("No input modality!")
     # Mesh and SMPL utils
@@ -748,6 +748,13 @@ def main(args):
     dataset = Dataset(args)
 
     if args.train==True:
+        if args.mix_data:
+            datasets = [
+                dataset,
+                Datasets.CLIFFDataset(args, data_path='/home/nesc525/drivers/7/COCO'),
+                Datasets.CLIFFDataset(args, data_path='/home/nesc525/drivers/7/mpii'),
+            ]
+            dataset = torch.utils.data.ConcatDataset(datasets)
         train_size = int(0.9 * len(dataset))
         eval_size = len(dataset) - train_size
         dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
@@ -775,8 +782,6 @@ def parse_args():
                         help="adjust image resolution.") 
     parser.add_argument("--test_scene", type=str, default='lab1')
     parser.add_argument("--seq_idxes", type=str, default='') 
-    parser.add_argument('--create_pkl', dest="create_pkl", action="store_true", help='create pkl data')
-    parser.add_argument('--use_pkl', dest="use_pkl", action="store_true", help='use pkl data')
     parser.add_argument('--skip_head', type=int, default=0)
     parser.add_argument('--skip_tail', type=int, default=0)
     parser.add_argument('--dataset', type=str, default='mmBodyDataset')
@@ -787,6 +792,7 @@ def parse_args():
     parser.add_argument("--mesh_type", default='smplx', type=str, help="smplx or smpl") 
     parser.add_argument('--mask_ratio', type=float, default=0.3)
     parser.add_argument('--mask_limbs', action="store_true")
+    parser.add_argument('--point_mask_ratio', type=float, default=0.01)
     parser.add_argument('--mix_data', action="store_true")
     #########################################################
     # Loading/saving checkpoints
