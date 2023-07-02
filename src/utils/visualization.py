@@ -301,9 +301,9 @@ class EvaluateStreamPlot(O3DStreamPlot):
         #     mat.line_width = 10  # note that this is scaled with respect to pixels,
         
         super().init_show()
-        # self.ctr.set_up(np.array([[0], [0], [1]]))
-        # self.ctr.set_front(np.array([[0], [-1], [0]]))
-        self.ctr.set_up(np.array([[0], [-1], [0]]))
-        self.ctr.set_front(np.array([[0], [0], [-1]]))
+        self.ctr.set_up(np.array([[0], [0], [1]]))
+        self.ctr.set_front(np.array([[0], [-1], [0]]))
+        # self.ctr.set_up(np.array([[0], [-1], [0]]))
+        # self.ctr.set_front(np.array([[0], [0], [-1]]))
         self.ctr.set_lookat(np.array([0, 0, 0]))
         self.ctr.set_zoom(1)

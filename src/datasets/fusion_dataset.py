@@ -43,18 +43,18 @@ class mmBodyDataset():
                 return seq_idx, frame_idx
         raise IndexError
     
-    def process_image(self, image, joints=None, trans_mat=None, need_crop=False, intrinsic=None):
+    def process_image(self, image, joints_3d=None, trans_mat=None, need_crop=False, intrinsic=None):
         if need_crop:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             # crop person area using joints
-            image = crop_image(joints, image, trans_mat, square=True, intrinsic=intrinsic, visual=False)
+            image = crop_image(joints_3d, image, trans_mat, square=True, intrinsic=intrinsic, visual=False)
             image = cv2.resize(image, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
         image = np.transpose(image.astype('float32'), (2,0,1))/255.0
         image = torch.from_numpy(image).float()
         transformed_img = self.normalize_img(image)
         return transformed_img
     
-    def process_pcl(self, pcl, joints, padding_points=1024, mask=False, need_filter=False, pelvis_idx=0, mask_ratio=0.99):
+    def process_pcl(self, pcl, joints, padding_points=1024, mask=False, need_filter=False, pelvis_idx=0, mask_ratio=0.99, num_mask_limbs=None):
         # filter person pcl using joints
         if need_filter:
             pcl = filter_pcl(joints, pcl)
@@ -62,12 +62,18 @@ class mmBodyDataset():
             # mask points
             lowwer_body_mask = pcl[:, 2] < joints[1,2] - 0.2
             limb_joints = [15, 18, 19, 20, 21]
-            mask_ind = gen_random_indices(num_indices=len(limb_joints), min_size=1)
-            limb_ind = np.array(limb_joints)[mask_ind]
-            dists = np.minimum.reduce([np.linalg.norm(pcl[:,:3] - joints[i], axis=1) for i in limb_ind])
-            points_mask_ind = np.logical_or(dists < 0.2, lowwer_body_mask)
+            if num_mask_limbs is None:
+                mask_ind = gen_random_indices(num_indices=len(limb_joints), min_size=0, includ_right=True)
+            else:
+                mask_ind = gen_random_indices(num_indices=len(limb_joints), size=num_mask_limbs)
+            if len(mask_ind):
+                limb_ind = np.array(limb_joints)[mask_ind]
+                dists = np.minimum.reduce([np.linalg.norm(pcl[:,:3] - joints[i], axis=1) for i in limb_ind])
+                points_mask_ind = np.logical_or(dists < 0.2, lowwer_body_mask)
+            else:
+                points_mask_ind = lowwer_body_mask
             mask_points = pcl[points_mask_ind]
-            sel_res_ind = gen_random_indices(len(mask_points), min_ratio=0.99-mask_ratio, max_ratio=1-mask_ratio)
+            sel_res_ind = gen_random_indices(len(mask_points), max_ratio=1-mask_ratio)
             pcl = np.vstack((pcl[~points_mask_ind], mask_points[sel_res_ind]))
             
         if not pcl.shape[0]:
@@ -90,7 +96,7 @@ class mmBodyDataset():
         frame = seq_loader[frame_idx]
         # get mesh parameters
         mesh = dict(frame['mesh'])
-        joints = mesh['joints'][:22]
+        joints_3d = mesh['joints'][:22]
         verts = mesh['vertices']
         result = {}
         
@@ -103,17 +109,22 @@ class mmBodyDataset():
         orig_imgs = {}
         trans_mat = {}
         bbox = {}
+        joints_2d = {}
         for image in self.args.input_dict['image']:
             if self.args.show_att:
-                orig_imgs[image] = frame[image]
-            result[image] = self.process_image(frame[image], joints, seq_loader.calib[image])
+                orig_imgs[image] = frame[image].copy()
+            result[image] = self.process_image(frame[image], joints_3d, seq_loader.calib[image])
             trans_mat[image] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[image])).float()
             bbox[image] = frame['bbox{}'.format(image[-1])].reshape(-1)
+            resize_ratio = [self.img_res, self.img_res] / (bbox[image][2:] - bbox[image][:2])
+            joints_2d[image] = ((project_pcl(joints_3d, trans_mat=seq_loader.calib[image], 
+                                intrinsic=INTRINSIC[image]) - bbox[image][0:2]) * resize_ratio).astype(np.int64)
 
         # process depth pcl
         for depth in self.args.input_dict['depth']:
-            result[depth] = self.process_pcl(frame[depth], joints, self.args.num_points, mask=self.args.mask_limbs, 
-                                             pelvis_idx=pelvis_idx, mask_ratio=self.args.point_mask_ratio)
+            result[depth] = self.process_pcl(frame[depth], joints_3d, self.args.num_points, mask=self.args.mask_limbs, 
+                                             pelvis_idx=pelvis_idx, mask_ratio=self.args.point_mask_ratio,
+                                             num_mask_limbs=self.args.num_mask_limbs)
             trans_mat[depth] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[depth])).float()
             
         # process radar pcl
@@ -121,12 +132,12 @@ class mmBodyDataset():
         if 'radar0' in self.args.inputs:
             radar_pcl = frame['radar0']
             radar_pcl[:,3:] /= np.array([5e-38, 5., 150.])
-            result['radar0'] = self.process_pcl(radar_pcl, joints, 1024, need_filter=True, pelvis_idx=pelvis_idx)
+            result['radar0'] = self.process_pcl(radar_pcl, joints_3d, 1024, need_filter=True, pelvis_idx=pelvis_idx)
             trans_mat['radar0'] = torch.tensor([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]).float()
                             
         # return result
-        result['joints_3d'] = torch.from_numpy(joints).float()
-        result['root_pelvis'] = torch.from_numpy(joints[pelvis_idx]).float()
+        result['joints_3d'] = torch.from_numpy(joints_3d).float()
+        result['root_pelvis'] = torch.from_numpy(joints_3d[pelvis_idx]).float()
         result['vertices'] = torch.from_numpy(verts).float()
 
         result['joint_mask'] = joint_mask
@@ -135,6 +146,7 @@ class mmBodyDataset():
         result['trans_mat'] = trans_mat
         result['orig_img'] = orig_imgs
         result['bbox'] = bbox
+        result['joints_2d'] = joints_2d
         
         return result
 

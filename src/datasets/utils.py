@@ -395,7 +395,7 @@ def rodrigues_2_rot_mat(rvecs):
     return R.reshape(batch_size, -1)
 
 def gen_random_indices(num_indices, size=None, min_size=None, max_size=None, min_ratio=0., max_ratio=1., includ_right=False):
-    # generate x% of max_random_num random indices
+    # generate random indices
     if num_indices <= 0:
         return []
     if size is None:

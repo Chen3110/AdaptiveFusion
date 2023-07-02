@@ -43,7 +43,7 @@ def quat2mat(quat):
                           2*xz - 2*wy, 2*wx + 2*yz, w2 - x2 - y2 + z2], dim=1).view(B, 3, 3)
     return rotMat    
     
-def orthographic_projection(X, camera):
+def orthographic_projection(X, camera, xy_dim=[0, 2]):
     """Perform orthographic projection of 3D points X using the camera parameters
     Args:
         X: size = [B, N, 3]
@@ -52,7 +52,7 @@ def orthographic_projection(X, camera):
         Projected 2D points -- size = [B, N, 2]
     """ 
     camera = camera.view(-1, 1, 3)
-    X_trans = X[:, :, :2] + camera[:, :, 1:]
+    X_trans = X[:, :, xy_dim] + camera[:, :, 1:]
     shape = X_trans.shape
     X_2d = (camera[:, :, 0] * X_trans.view(shape[0], -1)).view(shape)
     return X_2d

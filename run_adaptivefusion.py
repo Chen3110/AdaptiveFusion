@@ -12,6 +12,7 @@ import gc
 import numpy as np
 import cv2
 from openpyxl import load_workbook, Workbook
+from torchvision.utils import make_grid
 from src.datasets.utils import copy2cpu, crop_image, project_pcl, trans_mat_2_dict, INTRINSIC
 
 from src.modeling.bert import BertConfig, Graphormer
@@ -22,6 +23,7 @@ from src.modeling.hrnet.config import config as hrnet_config
 from src.modeling.hrnet.config import update_config as hrnet_update_config
 from src.datasets.build import make_data_loader
 from src.modeling.pointnet2.pointnet2_modules import PointnetSAModule
+from src.utils.geometric_layers import orthographic_projection
 
 from src.utils.logger import setup_logger
 from src.utils.comm import synchronize, is_main_process, get_rank, all_gather
@@ -30,6 +32,7 @@ from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.metric_pampjpe import reconstruction_error
 import src.datasets.fusion_dataset as Datasets
 from src.utils.loss import LossManager
+from src.utils.renderer import visualize_reconstruction
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
 from src.utils.dingtalk import TimerBot
@@ -225,8 +228,9 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                                            weight_decay=0)
 
     # define loss function (criterion) and optimizer
-    criterion_keypoints = torch.nn.MSELoss(reduction='none').cuda(args.device)
-    criterion_vertices = torch.nn.L1Loss().cuda(args.device)
+    criterion_3d_keypoints = torch.nn.MSELoss(reduction='none').to(args.device)
+    criterion_vertices = torch.nn.L1Loss().to(args.device)
+    criterion_2d_keypoints = torch.nn.MSELoss(reduction='none').cuda(args.device)
 
     if args.distributed:
         fusiuon_model = torch.nn.parallel.DistributedDataParallel(
@@ -264,16 +268,16 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         data_time.update(time.time() - end)
 
         # normalize gt joints
-        gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
-        gt_3d_pelvis = data_dict['root_pelvis'].cuda(args.device)[:,None,:]
+        gt_3d_joints = data_dict['joints_3d'].to(args.device)
+        gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:]
         gt_3d_joints -= gt_3d_pelvis
         batch_size = gt_3d_joints.shape[0]
 
-        joint_mask = data_dict['joint_mask'].cuda(args.device)
-        vert_mask = data_dict['vert_mask'].cuda(args.device)
+        joint_mask = data_dict['joint_mask'].to(args.device)
+        vert_mask = data_dict['vert_mask'].to(args.device)
 
         # generate simplified mesh
-        gt_vertices = data_dict['vertices'].cuda(args.device)
+        gt_vertices = data_dict['vertices'].to(args.device)
         gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices, n1=0, n2=2)
         gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
 
@@ -283,7 +287,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         gt_vertices -= gt_3d_pelvis
         
         for m in args.inputs:
-            data_dict[m] = data_dict[m].cuda(args.device)
+            data_dict[m] = data_dict[m].to(args.device)
 
         # prepare masks for mask vertex/joint modeling
         joint_mask_ = joint_mask.expand(-1,-1,2051)
@@ -294,17 +298,22 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = fusiuon_model(args, data_dict, smpl, mesh_sampler, meta_masks=meta_masks, is_train=True)
 
         # compute 3d joint loss  (where the joints are directly output from transformer)
-        loss_3d_joints = keypoint_3d_loss(criterion_keypoints, pred_3d_joints, gt_3d_joints, args.device)
+        loss_3d_joints = keypoint_3d_loss(criterion_3d_keypoints, pred_3d_joints, gt_3d_joints, args.device)
         # compute 3d vertex loss
         loss_vertices = (args.vloss_w_sub2 * vertices_loss(criterion_vertices, pred_vertices_sub2, gt_vertices_sub2, args.device) + \
                             args.vloss_w_sub * vertices_loss(criterion_vertices, pred_vertices_sub, gt_vertices_sub, args.device) + \
                             args.vloss_w_full * vertices_loss(criterion_vertices, pred_vertices, gt_vertices, args.device))
-
+        if args.joints_2d_loss:
+            gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].float().to(args.device)
+            pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
+            loss_2d_joints = keypoint_2d_loss(criterion_2d_keypoints, pred_2d_joints, gt_2d_joints, args.device)
+            loss_manager.update_loss("2d_joint_loss", args.joints_loss_weight*loss_2d_joints)
+        
         loss_manager.update_loss("3d_joint_loss", args.joints_loss_weight*loss_3d_joints)
         loss_manager.update_loss("vertex_loss", args.vertices_loss_weight*loss_vertices)
         
         if args.model == 'TokenFusion':
-            score_loss = torch.sum(torch.abs(pred_dict.get('pred_score', torch.zeros(1).cuda())))
+            score_loss = torch.sum(torch.abs(pred_dict.get('pred_score', torch.zeros(1).to())))
             loss_manager.update_loss("score_loss", 1e-3*score_loss)
         
         # we empirically use hyperparameters to balance difference losses
@@ -406,10 +415,10 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
         print('frame_id:', i)
         if not args.show_att:
             depth_colors = dict(
-                depth0=np.asarray([245, 157, 86]) /255,
-                depth1=np.asarray([59, 170, 235]) /255,
-                depth2=np.asarray([0, 204, 0]) /255,
-                depth3=np.asarray([202, 139, 245]) /255,
+                depth0=np.asarray([245, 157, 86]) / 255,
+                depth1=np.asarray([59, 170, 235]) / 255,
+                depth2=np.asarray([0, 204, 0]) / 255,
+                depth3=np.asarray([202, 139, 245]) / 255,
             )
             res = {}
             res.update({
@@ -426,7 +435,7 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
                 ),
                 pred_smpl = dict(
                     mesh = [copy2cpu(pred_vertices)[i], copy2cpu(face)],
-                    color = np.asarray([179, 230, 213]) /255
+                    color = np.asarray([179, 230, 213]) / 255
                 ),
                 label_smpl = dict(
                     mesh = [copy2cpu(gt_vertices)[i], copy2cpu(face)],
@@ -464,12 +473,12 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
     with torch.no_grad():
         for i, data_dict in enumerate(val_loader):
             # compute output
-            gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
-            gt_3d_pelvis = data_dict['root_pelvis'].cuda(args.device)[:,None,:]
+            gt_3d_joints = data_dict['joints_3d'].to(args.device)
+            gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:]
             gt_3d_joints -= gt_3d_pelvis
 
             # generate simplified mesh
-            gt_vertices = data_dict['vertices'].cuda(args.device)
+            gt_vertices = data_dict['vertices'].to(args.device)
             gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
             gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices_sub, n1=1, n2=2)
 
@@ -479,7 +488,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             gt_vertices -= gt_3d_pelvis
                     
             for m in args.inputs:
-                data_dict[m] = data_dict[m].cuda(args.device)
+                data_dict[m] = data_dict[m].to(args.device)
                 
             # forward-pass
             pred_dict, pred_3d_joints, pred_verts_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
@@ -700,17 +709,26 @@ def main(args):
             # remove the last fc layer
             img_backbone = torch.nn.Sequential(*list(img_backbone.children())[:-2])
 
-
         trans_encoder = torch.nn.Sequential(*trans_encoder)
         total_params = sum(p.numel() for p in trans_encoder.parameters())
         logger.info('Graphormer encoders total parameters: {}'.format(total_params))
         backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
         
-        radar_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=32, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
-        depth_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=64, mlp=[3,128,128,1024,1024,2048], use_xyz=True)
+        if args.model == 'PointWImageFeat':
+            mlps = [2048,4096,4096,2048]
+        elif args.use_point_feat:
+            mlps = [3,128,128,1024,1024,2048]
+        else:
+            mlps = [0,128,128,1024,1024,2048]
+        radar_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=32, mlp=mlps.copy())
+        depth_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=64, mlp=mlps.copy())
         
-        backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
+        backbone = dict(
+            radar=radar_backbone.to(args.device), 
+            image=img_backbone.to(args.device), 
+            depth=depth_backbone.to(args.device)
+        )
 
         # build end-to-end Graphormer network (backbone + multi-layer graphormer encoder)
         Model = getattr(Models, args.model)
@@ -774,7 +792,7 @@ def parse_args():
     #########################################################
     # Data related arguments
     #########################################################
-    parser.add_argument("--data_path", default='/home/nesc525/drivers/6/dataset', type=str, required=False,
+    parser.add_argument("--data_path", default='/home/nesc525/drivers/6/mmBody', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
     parser.add_argument("--num_workers", default=4, type=int, 
                         help="Workers in dataloader.")
@@ -785,14 +803,16 @@ def parse_args():
     parser.add_argument('--skip_head', type=int, default=0)
     parser.add_argument('--skip_tail', type=int, default=0)
     parser.add_argument('--dataset', type=str, default='mmBodyDataset')
-    parser.add_argument('--num_points', type=int, default=4096)
+    parser.add_argument('--num_points', type=int, default=1024)
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
     parser.add_argument('--inputs', type=str, default='image0,image1,depth0,depth1,radar', help='input data')
     parser.add_argument('--trans_coor_to_cam', action="store_true")
     parser.add_argument("--mesh_type", default='smplx', type=str, help="smplx or smpl") 
     parser.add_argument('--mask_ratio', type=float, default=0.3)
+    parser.add_argument('--num_clusters', type=int, default=49)
     parser.add_argument('--mask_limbs', action="store_true")
-    parser.add_argument('--point_mask_ratio', type=float, default=0.01)
+    parser.add_argument('--point_mask_ratio', type=float, default=0.99)
+    parser.add_argument('--num_mask_limbs', type=int, default=None)
     parser.add_argument('--mix_data', action="store_true")
     #########################################################
     # Loading/saving checkpoints
@@ -847,7 +867,7 @@ def parse_args():
     parser.add_argument("--which_gcn", default='0,0,1', type=str, 
                         help="which encoder block to have graph conv. Encoder1, Encoder2, Encoder3. Default: only Encoder3 has graph conv") 
     parser.add_argument("--interm_size_scale", default=2, type=int)
-    parser.add_argument("--num_cluster_feat", default=32, type=int)
+    parser.add_argument('--use_point_feat', action="store_true", help='use point feature')
     #########################################################
     # Others
     #########################################################
@@ -858,7 +878,7 @@ def parse_args():
                         help="Log every X steps.")
     parser.add_argument("--device", type=str, default='cuda', 
                         help="cuda or cpu")
-    parser.add_argument("--gpu_idx", type=int, default=0, )
+    parser.add_argument("--gpu_idx", type=int, default=0, help="select gpu")
     parser.add_argument('--seed', type=int, default=88, 
                         help="random seed for initialization.")
     parser.add_argument("--local_rank", type=int, default=0, 
@@ -875,7 +895,7 @@ def parse_args():
     parser.add_argument('--joint_id', type=int, default=0)
     parser.add_argument('--calib_emb', action="store_true")
     parser.add_argument('--shuffle_inputs', action="store_true")
-    parser.add_argument('--num_clusters', type=int, default=49)
+    parser.add_argument('--joints_2d_loss', type=str, default='')
 
     args = parser.parse_args()
     return args

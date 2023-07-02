@@ -9,9 +9,7 @@ from src.modeling.bert.transformer import FFN, PredictorLG, Transformer, Transfo
 class AdaptiveFusion(torch.nn.Module):
     def __init__(self, args, backbone, trans_encoder):
         super(AdaptiveFusion, self).__init__()
-        self.image_backbone = backbone['image']
-        self.depth_backbone = backbone['depth']
-        self.radar_backbone = backbone['radar']
+        self.backbone = backbone
         self.trans_encoder = trans_encoder
         if args.mesh_type == 'smplx':
             self.upsampling = torch.nn.Linear(655, 2619)
@@ -19,18 +17,24 @@ class AdaptiveFusion(torch.nn.Module):
         elif args.mesh_type == 'smpl':
             self.upsampling = torch.nn.Linear(431, 1723)
             self.upsampling2 = torch.nn.Linear(1723, 6890)
-        self.radar_feat_num_dim = torch.nn.Linear(args.num_clusters, 1)
         self.image_feat_dim = torch.nn.Linear(1024, 2051)
-        self.depth_feat_num_dim = torch.nn.Linear(49, 1)
+        self.point_feat_num_dim = torch.nn.Linear(args.num_clusters, 1)
         self.point_embedding = torch.nn.Linear(3, 2051)
         self.GIM = Transformer(dim=2048, depth=3, heads=8, dim_head=256, mlp_dim=4096)
         self.global_embedding = torch.nn.Embedding(10, 2048)
         self.local_embedding = torch.nn.Embedding(10, 2051)
         self.calib_embedding = torch.nn.Linear(12, 2051)
+        if args.joints_2d_loss:
+            self.cam_param_fc = torch.nn.Linear(3, 1)
+            if args.mesh_type == 'smplx':
+                self.cam_param_fc2 = torch.nn.Linear(655, 250)
+            elif args.mesh_type == 'smpl':
+                self.cam_param_fc2 = torch.nn.Linear(431, 250)
+            self.cam_param_fc3 = torch.nn.Linear(250, 3)
         
     def process_image(self, images, pos_emb):
         # extract grid features and global image features using a CNN backbone
-        image_feat, grid_feat = self.image_backbone(images)
+        image_feat, grid_feat = self.backbone['image'](images)
         # process grid features
         grid_feat = torch.flatten(grid_feat, start_dim=2)
         grid_feat = grid_feat.transpose(1,2)
@@ -44,20 +48,18 @@ class AdaptiveFusion(torch.nn.Module):
         
         return image_feat, grid_feat
 
-    def process_point(self, points, pos_emb, input='depth'):
+    def process_point(self, points, input='depth0', use_point_feat=False):
         # extract cluster features and global point features using a PointNet backbone
-        if 'radar' in input:
-            xyz, cluster_feat = self.radar_backbone(xyz=points[:,:,:3].contiguous(),features=points[:,:,3:].transpose(1,2).contiguous())
-            point_feat = self.radar_feat_num_dim(cluster_feat).squeeze()        
+        if use_point_feat:
+            xyz, cluster_feat = self.backbone[input[:-1]](xyz=points[:,:,:3].contiguous(),features=points[:,:,3:].transpose(1,2).contiguous())
         else:
-            xyz, cluster_feat = self.depth_backbone(xyz=points[:,:,:3].contiguous(),features=points[:,:,3:].transpose(1,2).contiguous())
-            # xyz, cluster_feat = self.depth_backbone(xyz=points[:,:,:3].contiguous())
-            point_feat = self.depth_feat_num_dim(cluster_feat).squeeze()
+            xyz, cluster_feat = self.backbone[input[:-1]](xyz=points[:,:,:3].contiguous())
+        point_feat = self.point_feat_num_dim(cluster_feat).squeeze()
         cluster_feat = torch.cat([xyz, cluster_feat.transpose(1,2).contiguous()], dim=2)
         # add embeddings
         xyz_embedding = self.point_embedding(xyz)
         cluster_feat += xyz_embedding
-        embeddings = torch.full((points.shape[0], 1), pos_emb, dtype=torch.long, device=points.device)
+        embeddings = torch.full((points.shape[0], 1), int(input[-1]), dtype=torch.long, device=points.device)
         global_pos_emb = self.global_embedding(embeddings)
         local_pos_emb = self.local_embedding(embeddings)
         point_feat = point_feat.view(points.shape[0],1,2048) + global_pos_emb
@@ -139,7 +141,7 @@ class AdaptiveFusion(torch.nn.Module):
                 if input in args.input_dict['image']:
                     global_feat, local_feat = self.process_image(data_dict[input], pos_emb=int(input[-1]))
                 else:
-                    global_feat, local_feat, xyz = self.process_point(data_dict[input], pos_emb=int(input[-1]), input=input)
+                    global_feat, local_feat, xyz = self.process_point(data_dict[input], input=input, use_point_feat=args.use_point_feat)
                     cluster_centers[input] = xyz
                 global_feats.append(global_feat)
                 local_feats.append(local_feat)
@@ -177,7 +179,7 @@ class AdaptiveFusion(torch.nn.Module):
             pred_dict['cluster_centers'] = cluster_centers
         else:
             features = self.trans_encoder(features)
-
+            
         pred_3d_joints = features[:,:num_joints,:]
         pred_vertices_sub2 = features[:,num_joints:num_joints+num_verts,:]
 
@@ -186,6 +188,15 @@ class AdaptiveFusion(torch.nn.Module):
         pred_vertices_full = self.upsampling2(pred_vertices_sub)
         pred_vertices_sub = pred_vertices_sub.transpose(1,2)
         pred_vertices_full = pred_vertices_full.transpose(1,2)
+        
+        if args.joints_2d_loss:
+            x = self.cam_param_fc(pred_vertices_sub2)
+            x = x.transpose(1,2)
+            x = self.cam_param_fc2(x)
+            x = self.cam_param_fc3(x)
+            cam_param = x.transpose(1,2)
+            cam_param = cam_param.squeeze()
+            pred_dict['camera'] = cam_param
         
         return pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 
@@ -620,21 +631,16 @@ class PointWImageFeat(AdaptiveFusion):
     def __init__(self, args, backbone, trans_encoder):
         super().__init__(args, backbone, trans_encoder)
     
-    def process_point(self, points, image_feat, pos_emb, input='depth'):
+    def process_point(self, points, image_feat, input='depth0'):
         # extract cluster features and global point features using a PointNet backbone
-        if 'radar' in input:
-            xyz, cluster_feat = self.radar_backbone(xyz=points[:,:,:3].contiguous(),
+        xyz, cluster_feat = self.backbone[input[:-1]](xyz=points[:,:,:3].contiguous(),
                                                     features=image_feat.repeat(1,points.shape[1],1).transpose(1,2).contiguous())
-            point_feat = self.radar_feat_num_dim(cluster_feat).squeeze()        
-        else:
-            xyz, cluster_feat = self.depth_backbone(xyz=points[:,:,:3].contiguous(),
-                                                    features=image_feat.repeat(1,points.shape[1],1).transpose(1,2).contiguous())
-            point_feat = self.depth_feat_num_dim(cluster_feat).squeeze()
+        point_feat = self.point_feat_num_dim(cluster_feat).squeeze()
         cluster_feat = torch.cat([xyz, cluster_feat.transpose(1,2).contiguous()], dim=2)
         # add embeddings
         xyz_embedding = self.point_embedding(xyz)
         cluster_feat += xyz_embedding
-        embeddings = torch.full((points.shape[0], 1), pos_emb, dtype=torch.long, device=points.device)
+        embeddings = torch.full((points.shape[0], 1), int(input[-1]), dtype=torch.long, device=points.device)
         global_pos_emb = self.global_embedding(embeddings)
         local_pos_emb = self.local_embedding(embeddings)
         point_feat = point_feat.view(points.shape[0],1,2048) + global_pos_emb
@@ -713,7 +719,7 @@ class PointWImageFeat(AdaptiveFusion):
             image_feat, _ = self.process_image(data_dict[input], pos_emb=int(input[-1]))
         for input in args.inputs:
             if input not in args.input_dict['image']:
-                global_feat, local_feat, xyz = self.process_point(data_dict[input], image_feat, pos_emb=int(input[-1]), input=input)
+                global_feat, local_feat, xyz = self.process_point(data_dict[input], image_feat, input=input)
                 cluster_centers[input] = xyz
                 
         if not args.wo_GIM:
