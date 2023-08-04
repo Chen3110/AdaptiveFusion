@@ -1,3 +1,4 @@
+import sys
 import cv2
 import os.path as op
 import numpy as np
@@ -43,15 +44,17 @@ class mmBodyDataset():
                 return seq_idx, frame_idx
         raise IndexError
     
-    def process_image(self, image, joints_3d=None, trans_mat=None, need_crop=False, intrinsic=None):
+    def process_image(self, image, joints_3d=None, trans_mat=None, need_crop=False):
         if need_crop:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             # crop person area using joints
-            image = crop_image(joints_3d, image, trans_mat, square=True, intrinsic=intrinsic, visual=False)
+            image, box_min, box_max = crop_image(joints_3d, image, trans_mat, square=True, return_box=True)
             image = cv2.resize(image, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
         image = np.transpose(image.astype('float32'), (2,0,1))/255.0
         image = torch.from_numpy(image).float()
         transformed_img = self.normalize_img(image)
+        if need_crop:
+            return transformed_img, image, box_min, box_max
         return transformed_img
     
     def process_pcl(self, pcl, joints, padding_points=1024, mask=False, need_filter=False, pelvis_idx=0, mask_ratio=0.99, num_mask_limbs=None):
@@ -196,7 +199,7 @@ class HuMManDataset(mmBodyDataset):
         # masking tokens
         joint_mask = self.gen_mask(num_mask=24, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
         vert_mask = self.gen_mask(num_mask=431, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
-        pelvis_idx = 14
+        pelvis_idx = 0
             
         trans_mat = {}
         # process image
@@ -228,6 +231,7 @@ class BEHAVEDataset(mmBodyDataset):
         self.img_res = 224
         self.data_path = op.join(args.data_path, 'train') if args.train else op.join(args.data_path, 'test')
         self.resource = args.inputs
+        self.smpl_model = kwargs.get('smpl_model', SMPL())
         self.init_index_map()
         
     def init_index_map(self):
@@ -245,15 +249,18 @@ class BEHAVEDataset(mmBodyDataset):
     def load_data(self, seq_loader, frame_idx):
         frame = seq_loader[frame_idx]
         # get mesh parameters
-        mesh = dict(frame['mesh'])
-        joints = mesh['joints']
-        verts = mesh['vertices']
+        smpl_para = dict(frame['mesh'])
+        pose = np.concatenate((smpl_para['trans'][0], smpl_para['pose']))
+        betas = smpl_para['shape']
+        mesh = self.smpl_model(torch.from_numpy(pose[None]).float(), torch.from_numpy(betas[None]).float())
+        joints = copy2cpu(mesh['joints'][0])
+        verts = copy2cpu(mesh['vertices'][0])
         result = {}
         
         # masking tokens
         joint_mask = self.gen_mask(num_mask=24, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
         vert_mask = self.gen_mask(num_mask=431, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
-        pelvis_idx = 14
+        pelvis_idx = 0
             
         trans_mat = {}
         # process image
@@ -285,6 +292,7 @@ class Human36MDataset(BEHAVEDataset):
     def init_index_map(self):
         self.index_map = [0,]
         self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p[0]=='s']
+        # self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p=='s_01_act_02_subact_01']
         self.seq_paths.sort()
         
         self.seq_loaders = {}
@@ -294,6 +302,46 @@ class Human36MDataset(BEHAVEDataset):
             self.seq_loaders.update({path:seq_loader})
             self.index_map.append(self.index_map[-1] + len(seq_loader))
 
+    def load_data(self, seq_loader, frame_idx):
+        frame = seq_loader[frame_idx]
+        # get mesh parameters
+        smpl_para = dict(frame['mesh'])
+        pose = np.concatenate((smpl_para['trans'][0], smpl_para['pose']))
+        betas = smpl_para['shape']
+        mesh = self.smpl_model(torch.from_numpy(pose[None]).float(), torch.from_numpy(betas[None]).float())
+        joints = copy2cpu(mesh['joints'][0])
+        verts = copy2cpu(mesh['vertices'][0])
+        joints_h36m = frame['joints_h36m']
+        result = {}
+        
+        # masking tokens
+        joint_mask = self.gen_mask(num_mask=24, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
+        vert_mask = self.gen_mask(num_mask=431, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
+        pelvis_idx = 0
+            
+        trans_mat = {}
+        joints_2d = {}
+        orig_imgs = {}
+        # process image
+        for image in self.args.input_dict['image']:
+            result[image], orig_imgs[image], box_min, box_max = self.process_image(frame[image], joints_h36m, seq_loader.calib[image], need_crop=True)
+            trans_mat[image] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[image])).float()
+            resize_ratio = [self.img_res, self.img_res] / (box_max - box_min)
+            joint_2d = (project_pcl(joints, trans_mat=seq_loader.calib[image], image_size=[1000,1002], return_int=False) - box_min) * resize_ratio
+            joints_2d[image] = 2. * joint_2d[:, [1, 0]]/self.img_res - 1.
+
+        # return result
+        result['joints_3d'] = torch.from_numpy(joints).float()
+        result['joints_2d'] = joints_2d
+        result['root_pelvis'] = torch.from_numpy(joints[pelvis_idx]).float()
+        result['vertices'] = torch.from_numpy(verts).float()
+        result['trans_mat'] = trans_mat
+        result['orig_img'] = orig_imgs
+
+        result['joint_mask'] = joint_mask
+        result['vert_mask'] = vert_mask
+
+        return result
 
 class CLIFFDataset(mmBodyDataset):
     def __init__(self, args, data_path):
@@ -316,7 +364,7 @@ class CLIFFDataset(mmBodyDataset):
         # masking tokens
         joint_mask = self.gen_mask(num_mask=24, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
         vert_mask = self.gen_mask(num_mask=431, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
-        pelvis_idx = 14
+        pelvis_idx = 0
         
         # process image
         img = cv2.imread(os.path.join(self.data_path, 'crop_images', self.images[idx]))

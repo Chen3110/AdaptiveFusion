@@ -220,8 +220,8 @@ def draw_skeleton(input_image, joints, draw_edges=True, vis=None, radius=None):
                 print('bad')
                 import ipdb
                 ipdb.set_trace()
-            cv2.line(image, (point[0], point[1]), (point_pa[0], point_pa[1]),
-                     colors[ecolors[child]], radius - 2)
+            # cv2.line(image, (point[0], point[1]), (point_pa[0], point_pa[1]),
+            #          colors[ecolors[child]], radius - 2)
 
     # Convert back in original dtype
     if input_is_float:
@@ -274,14 +274,14 @@ def visualize_reconstruction(img, img_size, gt_kp, vertices, pred_kp, camera, re
     rend_img = draw_text(rend_img, debug_text)
 
     # Draw skeleton
-    # gt_joint = ((gt_kp[:, :2] + 1) * 0.5) * img_size
-    # pred_joint = ((pred_kp + 1) * 0.5) * img_size
-    # img_with_gt = draw_skeleton( img, gt_joint, draw_edges=False)
-    # skel_img = draw_skeleton(img_with_gt, pred_joint)
+    gt_joint = ((gt_kp[:, :2] + 1) * 0.5) * img_size
+    pred_joint = ((pred_kp + 1) * 0.5) * img_size
+    img_with_gt = draw_skeleton( img, gt_joint, draw_edges=False)
+    skel_img = draw_skeleton(img_with_gt, pred_joint)
 
-    # combined = np.hstack([skel_img, rend_img])
+    combined = np.hstack([skel_img, rend_img])
 
-    return rend_img
+    return combined
 
 def visualize_reconstruction_test(img, img_size, gt_kp, vertices, pred_kp, camera, renderer, score, color='pink', focal_length=1000):
     """Overlays gt_kp and pred_kp on img.
@@ -301,14 +301,14 @@ def visualize_reconstruction_test(img, img_size, gt_kp, vertices, pred_kp, camer
     rend_img = draw_text(rend_img, debug_text)
 
     # Draw skeleton
-    # gt_joint = ((gt_kp[:, :2] + 1) * 0.5) * img_size
-    # pred_joint = ((pred_kp + 1) * 0.5) * img_size
-    # img_with_gt = draw_skeleton( img, gt_joint, draw_edges=False, vis=gt_vis)
-    # skel_img = draw_skeleton(img_with_gt, pred_joint)
+    gt_joint = ((gt_kp[:, :2] + 1) * 0.5) * img_size
+    pred_joint = ((pred_kp + 1) * 0.5) * img_size
+    img_with_gt = draw_skeleton( img, gt_joint, draw_edges=False, vis=gt_vis)
+    skel_img = draw_skeleton(img_with_gt, pred_joint)
 
-    # combined = np.hstack([skel_img, rend_img])
+    combined = np.hstack([skel_img, rend_img])
 
-    return rend_img
+    return combined
 
 
 

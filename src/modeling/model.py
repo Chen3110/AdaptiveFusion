@@ -3,13 +3,20 @@ import random
 import torch
 import numpy as np
 from src.datasets.utils import INTRINSIC, gen_random_indices, project_pcl_torch
-from src.modeling.bert.transformer import FFN, PredictorLG, Transformer, Transformer2
+from src.modeling.bert.transformer import FFN, PredictorLG, Transformer, TokenFusionTransformer
 
 
 class AdaptiveFusion(torch.nn.Module):
     def __init__(self, args, backbone, trans_encoder):
         super(AdaptiveFusion, self).__init__()
-        self.backbone = backbone
+        self.image_backbone = backbone['image']
+        self.depth_backbone = backbone['depth']
+        self.radar_backbone = backbone['radar']
+        self.backbone = dict(
+            image=self.image_backbone,
+            depth=self.depth_backbone,
+            radar=self.radar_backbone
+        )
         self.trans_encoder = trans_encoder
         if args.mesh_type == 'smplx':
             self.upsampling = torch.nn.Linear(655, 2619)
@@ -354,7 +361,7 @@ class TokenFusion(torch.nn.Module):
         self.image_backbone = backbone['image']
         self.depth_backbone = backbone['depth']
         self.radar_backbone = backbone['radar']
-        self.image_trans_encoder = Transformer2(dim=2048, depth=3, heads=8, dim_head=256, mlp_dim=4096)
+        self.image_trans_encoder = TokenFusionTransformer(dim=2048, depth=3, heads=8, dim_head=256, mlp_dim=4096)
         self.point_trans_encoder = copy.deepcopy(self.image_trans_encoder)
         self.trans_encoder = trans_encoder
         self.upsampling = torch.nn.Linear(655, 2619)

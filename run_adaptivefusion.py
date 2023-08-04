@@ -32,7 +32,7 @@ from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.metric_pampjpe import reconstruction_error
 import src.datasets.fusion_dataset as Datasets
 from src.utils.loss import LossManager
-from src.utils.renderer import visualize_reconstruction
+from src.utils.renderer import Renderer, visualize_reconstruction
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
 from src.utils.dingtalk import TimerBot
@@ -214,6 +214,28 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
 
     return res
 
+def visualize_mesh(renderer, images, gt_keypoints_2d, pred_vertices, pred_camera, pred_keypoints_2d):
+    """Tensorboard logging."""
+    gt_keypoints_2d = gt_keypoints_2d.cpu().numpy()
+    to_lsp = list(range(1,22))
+    rend_imgs = []
+    batch_size = pred_vertices.shape[0]
+    # Do visualization for the first 6 images of the batch
+    for i in range(min(batch_size, 10)):
+        img = images[i].cpu().numpy().transpose(1,2,0)
+        # Get LSP keypoints from the full list of keypoints
+        gt_keypoints_2d_ = gt_keypoints_2d[i, to_lsp]
+        pred_keypoints_2d_ = pred_keypoints_2d.cpu().numpy()[i, to_lsp]
+        # Get predict vertices for the particular example
+        vertices = pred_vertices[i].cpu().numpy()
+        cam = pred_camera[i].cpu().numpy()
+        # Visualize reconstruction and detected pose
+        rend_img = visualize_reconstruction(img, 224, gt_keypoints_2d_, vertices, pred_keypoints_2d_, cam, renderer)
+        rend_img = rend_img.transpose(2,0,1)
+        rend_imgs.append(torch.from_numpy(rend_img))   
+    rend_imgs = make_grid(rend_imgs, nrow=1)
+    return rend_imgs
+
 def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sampler, start_epoch):
     smpl.eval()
     max_iter = len(train_dataloader)
@@ -246,8 +268,10 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
             )
 
     ding_bot = TimerBot()
-    loss_manager = LossManager(ding_bot)
-
+    loss_manager_train = LossManager(ding_bot)
+    loss_manager_eval = LossManager(ding_bot)
+    renderer = Renderer(faces=smpl.faces.cpu().numpy())
+    
     start_training_time = time.time()
     end = time.time()
     fusiuon_model.train()
@@ -255,6 +279,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
     data_time = AverageMeter()
     log_losses = AverageMeter()
     log_loss_3djoints = AverageMeter()
+    log_loss_2djoints = AverageMeter()
     log_loss_vertices = AverageMeter()
     log_eval_metrics = EvalMetricsLogger()
 
@@ -307,17 +332,18 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
             gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].float().to(args.device)
             pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
             loss_2d_joints = keypoint_2d_loss(criterion_2d_keypoints, pred_2d_joints, gt_2d_joints, args.device)
-            loss_manager.update_loss("2d_joint_loss", args.joints_loss_weight*loss_2d_joints)
+            loss_manager_train.update_loss("2d_joint_loss", args.joints_loss_weight*loss_2d_joints)
+            log_loss_2djoints.update(loss_2d_joints.item(), batch_size)
         
-        loss_manager.update_loss("3d_joint_loss", args.joints_loss_weight*loss_3d_joints)
-        loss_manager.update_loss("vertex_loss", args.vertices_loss_weight*loss_vertices)
+        loss_manager_train.update_loss("3d_joint_loss", args.joints_loss_weight*loss_3d_joints)
+        loss_manager_train.update_loss("vertex_loss", args.vertices_loss_weight*loss_vertices)
         
         if args.model == 'TokenFusion':
-            score_loss = torch.sum(torch.abs(pred_dict.get('pred_score', torch.zeros(1).to())))
-            loss_manager.update_loss("score_loss", 1e-3*score_loss)
+            score_loss = torch.sum(torch.abs(pred_dict.get('pred_score', torch.zeros(1).cuda())))
+            loss_manager_train.update_loss("score_loss", 1e-3*score_loss)
         
         # we empirically use hyperparameters to balance difference losses
-        loss = loss_manager.calculate_total_loss()
+        loss = loss_manager_train.calculate_total_loss()
 
         # update logs
         log_loss_3djoints.update(loss_3d_joints.item(), batch_size)
@@ -349,14 +375,31 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
             aml_run.log(name='3d joint Loss', value=float(log_loss_3djoints.avg))
             aml_run.log(name='vertex Loss', value=float(log_loss_vertices.avg))
 
+            if args.joints_2d_loss:
+                aml_run.log(name='2d joint Loss', value=float(log_loss_2djoints.avg))
+                visual_imgs = visualize_mesh(renderer,
+                                            data_dict['orig_img'][args.joints_2d_loss].detach(),
+                                            data_dict['joints_2d'][args.joints_2d_loss].detach(),
+                                            pred_vertices.detach(), 
+                                            pred_dict['camera'].detach(),
+                                            pred_2d_joints.detach())
+                visual_imgs = visual_imgs.permute(1,2,0).numpy()
+                
+                if is_main_process():
+                    stamp = str(epoch) + '_' + str(iteration)
+                    temp_fname = args.output_dir + '/visual_' + stamp + '.jpg'
+                    cv2.imwrite(temp_fname, np.asarray(visual_imgs[:,:,::-1]*255))
+                    aml_run.log_image(name='visual results', path=temp_fname)
+                
         if iteration % iters_per_epoch == 0:
-            loss_manager.calculate_epoch_loss(os.path.join(args.output_dir, 'loss/train'), epoch)
+            if is_main_process():
+                loss_manager_train.calculate_epoch_loss(os.path.join(args.output_dir, 'loss/train'), epoch, args.gpu_idx)
             val_mPVE, val_mPJPE, val_PAmPJPE, val_count = run_validate(args, val_dataloader, 
                                                 fusiuon_model, 
                                                 epoch, 
                                                 smpl,
                                                 mesh_sampler,
-                                                loss_manager)
+                                                loss_manager_eval)
             
             aml_run.log(name='mPVE', value=float(1000*val_mPVE))
             aml_run.log(name='mPJPE', value=float(1000*val_mPJPE))
@@ -530,8 +573,8 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                     print('batch_id:', i)
                     plot.show(gen)
 
-    if loss_manager is not None:
-        loss_manager.calculate_epoch_loss(os.path.join(args.output_dir, 'loss/eval'), epoch)
+    if loss_manager is not None and is_main_process():
+        loss_manager.calculate_epoch_loss(os.path.join(args.output_dir, 'loss/eval'), epoch, args.gpu_idx)
     
     val_mPVE = all_gather(float(mPVE.avg))
     val_mPVE = sum(val_mPVE)/len(val_mPVE)
@@ -604,7 +647,7 @@ def main(args):
     torch.cuda.set_device(args.gpu_idx)
     args.device = torch.device(args.device)
     if args.distributed:
-        print("Init distributed training on local rank {} ({}), rank {}, world size {}".format(args.local_rank, int(os.environ["LOCAL_RANK"]), int(os.environ["NODE_RANK"]), args.num_gpus))
+        # print("Init distributed training on local rank {} ({}), rank {}, world size {}".format(args.local_rank, int(os.environ["LOCAL_RANK"]), int(os.environ["NODE_RANK"]), args.num_gpus))
         torch.cuda.set_device(args.local_rank)
         torch.distributed.init_process_group(
             backend='nccl', init_method='env://'
@@ -648,7 +691,7 @@ def main(args):
     if args.train==False and args.resume_checkpoint!=None and args.resume_checkpoint!='None':
         # if only run eval, load checkpoint
         logger.info("Evaluation: Loading from checkpoint {}".format(args.resume_checkpoint))
-        _model = torch.load(os.path.join(args.resume_checkpoint, 'model.bin'))
+        _model = torch.load(os.path.join(args.resume_checkpoint, 'model.bin'), map_location='cpu')
     else:
         # init three transformer-encoder blocks in a loop
         for i in range(len(output_feat_dim)):
@@ -724,11 +767,7 @@ def main(args):
         radar_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=32, mlp=mlps.copy())
         depth_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=64, mlp=mlps.copy())
         
-        backbone = dict(
-            radar=radar_backbone.to(args.device), 
-            image=img_backbone.to(args.device), 
-            depth=depth_backbone.to(args.device)
-        )
+        backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
 
         # build end-to-end Graphormer network (backbone + multi-layer graphormer encoder)
         Model = getattr(Models, args.model)

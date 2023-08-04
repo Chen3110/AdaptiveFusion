@@ -135,7 +135,7 @@ class SMPL(nn.Module):
         joints = torch.einsum('bik,ji->bjk', [vertices, self.J_regressor])
         joints_extra = torch.einsum('bik,ji->bjk', [vertices, self.J_regressor_extra])
         joints = torch.cat((joints, joints_extra), dim=1)
-        joints = joints[:, cfg.JOINTS_IDX]
+        joints = joints[:, :24]
         return joints
 
     def get_h36m_joints(self, vertices):

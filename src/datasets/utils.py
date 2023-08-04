@@ -138,7 +138,7 @@ class BEHAVESequenceLoader(object):
                                                                 '{}.npy'.format(idx+self.skip_head)))
                 })
         result['mesh'] = np.load(os.path.join(
-            self.seq_path, 'mesh', '{}.npz'.format(idx+self.skip_head)))
+            self.seq_path, 'smpl_params', '{}.npz'.format(idx+self.skip_head)))
             
         return result
 
@@ -159,18 +159,18 @@ class Human36MSequenceLoader(object):
                     'image{}'.format(i):calib['camera{}'.format(i)],
                 })
     def __len__(self):
-        return len(os.listdir(os.path.join(self.seq_path, 'mesh'))) - self.skip_head - self.skip_tail
+        return len(os.listdir(os.path.join(self.seq_path, 'smpl_params'))) - self.skip_head - self.skip_tail
 
     def __getitem__(self, idx: int):
         result = {}
         for i in range(1,5):
             if 'image{}'.format(i) in self.resource:
                 result.update({
-                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'camera{}'.format(i), 
+                    'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'orig_image', 'camera{}'.format(i), 
                                                                 '{}.png'.format(idx+self.skip_head))),
                 })
-        result['mesh'] = np.load(os.path.join(
-            self.seq_path, 'mesh', '{}.npz'.format(idx+self.skip_head)))
+        result['mesh'] = np.load(os.path.join(self.seq_path, 'smpl_params', '{}.npz'.format(idx+self.skip_head)))
+        result['joints_h36m'] = np.load(os.path.join(self.seq_path, 'joints_h36m', '{}.npy'.format(idx+self.skip_head)))
             
         return result
 
@@ -195,12 +195,13 @@ def copy2cpu(tensor):
     return tensor.detach().cpu().numpy()
 
 
-def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048]):
+def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048], return_int=True):
     if trans_mat is not None:
         pcl = (pcl - trans_mat['t']) @ np.array(trans_mat['R']).reshape(3, 3)
-    intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['image0']
+    intrinsic = np.array(intrinsic) if intrinsic is not None else np.array(trans_mat['K'])
     pcl_2d = ((pcl/pcl[:,2:3]) @ intrinsic.T)[:,:2]
-    pcl_2d = np.floor(pcl_2d).astype(int)
+    if return_int:
+        pcl_2d = np.floor(pcl_2d).astype(int)
     pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
     # filter out the points exceeding the image size
     image_size = np.array(image_size)
@@ -210,7 +211,7 @@ def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048]):
     return pcl_2d
 
 
-def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048]):
+def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048], return_int=True):
     """
     Project pcl to the image plane
     """
@@ -218,7 +219,8 @@ def project_pcl_torch(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048
         pcl = (pcl - trans_mat[:,None,:3,3]) @ trans_mat[:,:3,:3]
     intrinsic = intrinsic if intrinsic is not None else INTRINSIC['image0']
     pcl_2d = ((pcl/pcl[:,:,2:3]) @ torch.tensor(intrinsic).T.float().cuda())[:,:,:2]
-    pcl_2d = torch.floor(pcl_2d).long()
+    if return_int:
+        pcl_2d = torch.floor(pcl_2d).long()
     pcl_2d[:,:,[0,1]] = pcl_2d[:,:,[1,0]]
     image_size = torch.tensor(image_size).cuda()
     pcl_2d = torch.where(pcl_2d<image_size-1, pcl_2d, image_size-1)
@@ -282,7 +284,7 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
     # transform the joints to camera coordinate
     if trans_mat is not None:
         joints = (joints - trans_mat['t']) @ trans_mat['R']
-    intrinsic = intrinsic if intrinsic is not None else INTRINSIC['image0']
+    intrinsic = intrinsic if intrinsic is not None else trans_mat['K']
     joint_max = joints.max(axis=0) + margin
     joint_min = joints.min(axis=0) - margin
     # get 3d bounding box from joints

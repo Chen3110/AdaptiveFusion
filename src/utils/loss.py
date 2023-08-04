@@ -30,10 +30,10 @@ class LossManager():
         self.batch_loss.append(total_loss)
         return total_loss
 
-    def calculate_epoch_loss(self, output_path, epoch):
+    def calculate_epoch_loss(self, output_path, epoch, device=None):
         fig = plt.figure()
         loss_json = os.path.join(output_path, "loss.json")
-        if not os.path.isdir(output_path):
+        if not os.path.exists(loss_json):
             os.makedirs(output_path)
             open(loss_json, "w")
         with open(loss_json, "r") as f:
@@ -55,7 +55,8 @@ class LossManager():
         plt.close()
         cv2.imwrite(os.path.join(output_path, 'loss.png'), img)
         if self.ding_bot is not None:
-            self.ding_bot.add_md("train_mmGraphormer", "【IMG】 \n ![img]({}) \n 【{}】\n epoch={}, loss={}".format(self.ding_bot.img2b64(img), output_path, epoch, total_loss[-1]))
+            self.ding_bot.add_md("train_AMMFusion", "【IMG】 \n ![img]({}) \n 【{}】\n epoch={}, device={}, loss={}"
+                                 .format(self.ding_bot.img2b64(img), output_path, epoch, device, total_loss[-1]))
             self.ding_bot.enable()
         
         self.loss_dict = {}
