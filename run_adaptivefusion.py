@@ -32,7 +32,7 @@ from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.metric_pampjpe import reconstruction_error
 import src.datasets.fusion_dataset as Datasets
 from src.utils.loss import LossManager
-from src.utils.renderer import Renderer, visualize_reconstruction
+from src.utils.renderer import Renderer, visualize_reconstruction, visualize_reconstruction_no_text
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
 from src.utils.dingtalk import TimerBot
@@ -72,6 +72,10 @@ def mean_per_joint_position_error(pred, gt):
     Compute mPJPE
     """
     with torch.no_grad():
+        gt_pelvis = (gt[:, 2,:] + gt[:, 3,:]) / 2
+        gt = gt - gt_pelvis[:, None, :]
+        pred_pelvis = (pred[:, 2,:] + pred[:, 3,:]) / 2
+        pred = pred - pred_pelvis[:, None, :]
         error = torch.sqrt( ((pred - gt) ** 2).sum(dim=-1)).mean(dim=-1).cpu().numpy()
         return error
 
@@ -83,21 +87,28 @@ def mean_per_vertex_error(pred, gt):
         error = torch.sqrt( ((pred - gt) ** 2).sum(dim=-1)).mean(dim=-1).cpu().numpy()
         return error
 
-def keypoint_2d_loss(criterion_keypoints, pred_keypoints_2d, gt_keypoints_2d, has_pose_2d):
+def keypoint_2d_loss(criterion_keypoints, pred_keypoints_2d, gt_keypoints_2d):
     """
     Compute 2D reprojection loss if 2D keypoint annotations are available.
     The confidence (conf) is binary and indicates whether the keypoints exist or not.
     """
-    # conf = gt_keypoints_2d[:, :, -1].unsqueeze(-1).clone()
-    loss = (criterion_keypoints(pred_keypoints_2d, gt_keypoints_2d)).mean()
+    conf = 1.
+    if gt_keypoints_2d.shape[2] == 3:
+        conf = gt_keypoints_2d[:, :, -1].unsqueeze(-1).clone()
+        gt_keypoints_2d = gt_keypoints_2d[:, :, :-1]
+    loss = (conf * criterion_keypoints(pred_keypoints_2d, gt_keypoints_2d)).mean()
     return loss
 
 def keypoint_3d_loss(criterion_keypoints, pred_keypoints_3d, gt_keypoints_3d, device):
     """
     Compute 3D keypoint loss if 3D keypoint annotations are available.
     """
+    conf = 1.
+    if gt_keypoints_3d.shape[2] == 4:
+        conf = gt_keypoints_3d[:, :, -1].unsqueeze(-1).clone()
+        gt_keypoints_3d = gt_keypoints_3d[:, :, :-1]
     if len(gt_keypoints_3d) > 0:
-        return (criterion_keypoints(pred_keypoints_3d, gt_keypoints_3d)).mean()
+        return (conf * criterion_keypoints(pred_keypoints_3d, gt_keypoints_3d)).mean()
     else:
         return torch.FloatTensor(1).fill_(0.).to(device) 
 
@@ -294,8 +305,8 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
 
         # normalize gt joints
         gt_3d_joints = data_dict['joints_3d'].to(args.device)
-        gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:]
-        gt_3d_joints -= gt_3d_pelvis
+        gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:3]
+        gt_3d_joints[:,:,:3] -= gt_3d_pelvis
         batch_size = gt_3d_joints.shape[0]
 
         joint_mask = data_dict['joint_mask'].to(args.device)
@@ -331,7 +342,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         if args.joints_2d_loss:
             gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].float().to(args.device)
             pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
-            loss_2d_joints = keypoint_2d_loss(criterion_2d_keypoints, pred_2d_joints, gt_2d_joints, args.device)
+            loss_2d_joints = keypoint_2d_loss(criterion_2d_keypoints, pred_2d_joints, gt_2d_joints)
             loss_manager_train.update_loss("2d_joint_loss", args.joints_loss_weight*loss_2d_joints)
             log_loss_2djoints.update(loss_2d_joints.item(), batch_size)
         
@@ -379,15 +390,17 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                 aml_run.log(name='2d joint Loss', value=float(log_loss_2djoints.avg))
                 visual_imgs = visualize_mesh(renderer,
                                             data_dict['orig_img'][args.joints_2d_loss].detach(),
-                                            data_dict['joints_2d'][args.joints_2d_loss].detach(),
+                                            data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
                                             pred_vertices.detach(), 
                                             pred_dict['camera'].detach(),
                                             pred_2d_joints.detach())
                 visual_imgs = visual_imgs.permute(1,2,0).numpy()
                 
                 if is_main_process():
+                    if not os.path.exists(os.path.join(args.output_dir, 'visual')):
+                        os.makedirs(os.path.join(args.output_dir, 'visual'))
                     stamp = str(epoch) + '_' + str(iteration)
-                    temp_fname = args.output_dir + '/visual_' + stamp + '.jpg'
+                    temp_fname = os.path.join(args.output_dir, 'visual', 'visual_{}.jpg'.format(stamp))
                     cv2.imwrite(temp_fname, np.asarray(visual_imgs[:,:,::-1]*255))
                     aml_run.log_image(name='visual results', path=temp_fname)
                 
@@ -509,6 +522,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
         if not os.path.isdir(snapshot_path):
             os.makedirs(snapshot_path)
         plot = EvaluateStreamPlot(save_path=snapshot_path)
+        renderer = Renderer(faces=smpl.faces.cpu().numpy())
     # switch to evaluate mode
     fusion_model.eval()
     smpl.eval()
@@ -517,8 +531,8 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
         for i, data_dict in enumerate(val_loader):
             # compute output
             gt_3d_joints = data_dict['joints_3d'].to(args.device)
-            gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:]
-            gt_3d_joints -= gt_3d_pelvis
+            gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:3]
+            gt_3d_joints[:,:,:3] -= gt_3d_pelvis
 
             # generate simplified mesh
             gt_vertices = data_dict['vertices'].to(args.device)
@@ -536,15 +550,32 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             # forward-pass
             pred_dict, pred_3d_joints, pred_verts_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
 
+            pred_3d_pelvis = pred_3d_joints[:,0,:]
+            pred_vertices = pred_vertices - pred_3d_pelvis[:, None, :]
+            pred_3d_joints = pred_3d_joints - pred_3d_pelvis[:, None, :]
             # measure errors
             error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices)
-            error_joints = mean_per_joint_position_error(pred_3d_joints, gt_3d_joints)
+            error_joints = mean_per_joint_position_error(pred_3d_joints, gt_3d_joints[:,:,:3])
             error_joints_pa = reconstruction_error(pred_3d_joints.cpu().numpy(), gt_3d_joints[:,:,:3].cpu().numpy(), reduction=None)
 
-            per_joint_err.append(torch.norm((pred_3d_joints - gt_3d_joints), dim=-1))
-            per_vertex_err.append(torch.norm((pred_vertices - gt_vertices), dim=-1))
+            per_joint_err.append(torch.norm((pred_3d_joints - gt_3d_joints[:,:,:3]), dim=-1))
+            per_vertex_err.append(torch.norm((pred_vertices - gt_vertices[:,:,:3]), dim=-1))
             per_pampjpe.append(error_joints_pa)
 
+            if not args.train and args.joints_2d_loss and i%100==0:
+                pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
+                visual_imgs_output = visual_imgs = visualize_mesh(renderer,
+                                            data_dict['orig_img'][args.joints_2d_loss].detach(),
+                                            data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
+                                            pred_vertices.detach(), 
+                                            pred_dict['camera'].detach(),
+                                            pred_2d_joints.detach())
+                visual_imgs = visual_imgs_output.permute(1,2,0).numpy()
+                        
+                temp_fname = os.path.join(args.output_dir, 'snapshot', 'pred_{}.jpg'.format(i))
+                print('save to ', temp_fname)
+                cv2.imwrite(temp_fname, np.asarray(visual_imgs[:,:,::-1]*255))
+                
             if len(error_vertices)>0:
                 mPVE.update(np.mean(error_vertices))
             if len(error_joints)>0:
@@ -688,10 +719,21 @@ def main(args):
     # which encoder block to have graph convs
     which_blk_graph = [int(item) for item in args.which_gcn.split(',')]
     
-    if args.train==False and args.resume_checkpoint!=None and args.resume_checkpoint!='None':
+    start_epoch = 0
+    if args.resume_checkpoint!=None and args.resume_checkpoint!='None':
         # if only run eval, load checkpoint
         logger.info("Evaluation: Loading from checkpoint {}".format(args.resume_checkpoint))
         _model = torch.load(os.path.join(args.resume_checkpoint, 'model.bin'), map_location='cpu')
+        # for fine-tuning or resume training or inference, load weights from checkpoint
+        logger.info("Loading state dict from checkpoint {}".format(args.resume_checkpoint))
+        start_epoch = int(args.resume_checkpoint.split('-')[1])
+        # workaround approach to load sparse tensor in graph conv.
+        states = torch.load(os.path.join(args.resume_checkpoint, 'state_dict.bin'), map_location='cpu')
+        # del checkpoint_loaded
+        _model.load_state_dict(states, strict=False)
+        del states
+        gc.collect()
+        torch.cuda.empty_cache()
     else:
         # init three transformer-encoder blocks in a loop
         for i in range(len(output_feat_dim)):
@@ -773,22 +815,6 @@ def main(args):
         Model = getattr(Models, args.model)
         _model = Model(args, backbone, trans_encoder)
 
-        start_epoch = 0
-        if args.resume_checkpoint!=None and args.resume_checkpoint!='None':
-            # for fine-tuning or resume training or inference, load weights from checkpoint
-            logger.info("Loading state dict from checkpoint {}".format(args.resume_checkpoint))
-            start_epoch = int(args.resume_checkpoint.split('-')[1])
-            # workaround approach to load sparse tensor in graph conv.
-            states = torch.load(os.path.join(args.resume_checkpoint, 'state_dict.bin'))
-            # states = checkpoint_loaded.state_dict()
-            for k, v in states.items():
-                states[k] = v.cpu()
-            # del checkpoint_loaded
-            _model.load_state_dict(states, strict=False)
-            del states
-            gc.collect()
-            torch.cuda.empty_cache()
-
     # update configs to enable attention outputs
     if args.show_att:
         setattr(_model.trans_encoder[-1].config,'output_attentions', True)
@@ -808,8 +834,8 @@ def main(args):
         if args.mix_data:
             datasets = [
                 dataset,
-                Datasets.CLIFFDataset(args, data_path='/home/nesc525/drivers/7/COCO'),
-                Datasets.CLIFFDataset(args, data_path='/home/nesc525/drivers/7/mpii'),
+                Datasets.CLIFFDataset(args, data_path='/remote-home/chenanjun/dataset/COCO'),
+                Datasets.CLIFFDataset(args, data_path='/remote-home/chenanjun/dataset/mpii'),
             ]
             dataset = torch.utils.data.ConcatDataset(datasets)
         train_size = int(0.9 * len(dataset))

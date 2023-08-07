@@ -198,14 +198,16 @@ def copy2cpu(tensor):
 def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048], return_int=True):
     if trans_mat is not None:
         pcl = (pcl - trans_mat['t']) @ np.array(trans_mat['R']).reshape(3, 3)
-    intrinsic = np.array(intrinsic) if intrinsic is not None else np.array(trans_mat['K'])
-    pcl_2d = ((pcl/pcl[:,2:3]) @ intrinsic.T)[:,:2]
+        intrinsic = trans_mat['K']
+    intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['image0']
+    pcl_2d = ((pcl/pcl[:,2:3]) @ intrinsic.T)
     if return_int:
-        pcl_2d = np.floor(pcl_2d).astype(int)
-    pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
+        pcl_2d = np.floor(pcl_2d).astype(int)[:,:2]
+        pcl_2d[:, [0, 1]] = pcl_2d[:, [1, 0]]
+        image_size = image_size[::-1]
     # filter out the points exceeding the image size
     image_size = np.array(image_size)
-    pcl_2d = np.where(pcl_2d<image_size-1, pcl_2d, image_size-1)
+    pcl_2d[:,:2] = np.where(pcl_2d[:,:2]<image_size-1, pcl_2d[:,:2], image_size-1)
     pcl_2d = np.where(pcl_2d>0, pcl_2d, 0)
     
     return pcl_2d

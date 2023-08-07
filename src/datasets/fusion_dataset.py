@@ -161,7 +161,14 @@ class mmBodyDataset():
         seq_path = self.seq_paths[seq_idx]
         seq_loader =self.seq_loaders[seq_path]
         
-        return self.load_data(seq_loader, frame_idx)
+        try:
+            result = self.load_data(seq_loader, frame_idx)
+        except Exception as err:
+            print(idx, seq_path, frame_idx)
+            print(err)
+            sys.exit(1)
+        return result
+        # return self.load_data(seq_loader, frame_idx)
     
 
 class HuMManDataset(mmBodyDataset):
@@ -291,6 +298,7 @@ class Human36MDataset(BEHAVEDataset):
         
     def init_index_map(self):
         self.index_map = [0,]
+        # self.data_path = self.data_path.replace('test', 'train')
         self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p[0]=='s']
         # self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p=='s_01_act_02_subact_01']
         self.seq_paths.sort()
@@ -309,7 +317,7 @@ class Human36MDataset(BEHAVEDataset):
         pose = np.concatenate((smpl_para['trans'][0], smpl_para['pose']))
         betas = smpl_para['shape']
         mesh = self.smpl_model(torch.from_numpy(pose[None]).float(), torch.from_numpy(betas[None]).float())
-        joints = copy2cpu(mesh['joints'][0])
+        joints_3d = copy2cpu(mesh['joints'][0])
         verts = copy2cpu(mesh['vertices'][0])
         joints_h36m = frame['joints_h36m']
         result = {}
@@ -326,15 +334,21 @@ class Human36MDataset(BEHAVEDataset):
         for image in self.args.input_dict['image']:
             result[image], orig_imgs[image], box_min, box_max = self.process_image(frame[image], joints_h36m, seq_loader.calib[image], need_crop=True)
             trans_mat[image] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[image])).float()
-            resize_ratio = [self.img_res, self.img_res] / (box_max - box_min)
-            joint_2d = (project_pcl(joints, trans_mat=seq_loader.calib[image], image_size=[1000,1002], return_int=False) - box_min) * resize_ratio
-            joints_2d[image] = 2. * joint_2d[:, [1, 0]]/self.img_res - 1.
-
+            box_min, box_max = box_min[::-1], box_max[::-1]
+            joint_2d = project_pcl(joints_3d, trans_mat=seq_loader.calib[image], image_size=[1000,1002], return_int=False)
+            joint_2d[:,:2] = 2. * (joint_2d[:,:2] - box_min) / (box_max - box_min) - 1
+            joints_2d[image] = torch.from_numpy(joint_2d).float()
+        if self.args.joints_2d_loss:
+            joints_2d_trans_mat = seq_loader.calib[self.args.joints_2d_loss]
+            joints_3d = (joints_3d - joints_2d_trans_mat['t']) @ joints_2d_trans_mat['R']
+            verts = (verts - joints_2d_trans_mat['t']) @ joints_2d_trans_mat['R']
+        joints_3d = np.hstack((joints_3d, np.ones([joints_3d.shape[0], 1])))
+        
         # return result
-        result['joints_3d'] = torch.from_numpy(joints).float()
-        result['joints_2d'] = joints_2d
-        result['root_pelvis'] = torch.from_numpy(joints[pelvis_idx]).float()
+        result['joints_3d'] = torch.from_numpy(joints_3d).float()
+        result['root_pelvis'] = torch.from_numpy(joints_3d[pelvis_idx]).float()
         result['vertices'] = torch.from_numpy(verts).float()
+        result['joints_2d'] = joints_2d
         result['trans_mat'] = trans_mat
         result['orig_img'] = orig_imgs
 
@@ -348,36 +362,69 @@ class CLIFFDataset(mmBodyDataset):
         self.normalize_img = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.args = args
         self.img_res = 224
-        self.data_path = op.join(data_path, 'train')
-        self.images = os.listdir(os.path.join(self.data_path, 'crop_images'))
-        self.labels = os.listdir(os.path.join(self.data_path, 'mesh'))
+        self.data_path = data_path
+        self.labels = dict(np.load(os.path.join(self.data_path, 'cliffGT.npz')))
+        self.smpl_model = SMPL()
         
     def __len__(self):
-        return len(self.labels)
+        return len(self.labels['imgname'])
 
     def __getitem__(self, idx):
         result = {}
-        mesh = dict(np.load(os.path.join(self.data_path, 'mesh', self.labels[idx])))
-        joints = mesh['joints']
-        verts = mesh['vertices']
+        pose = np.concatenate((self.labels['global_t'][idx], self.labels['pose'][idx]))
+        betas = self.labels['shape'][idx]
+        mesh = self.smpl_model(torch.from_numpy(pose[None]).float(), torch.from_numpy(betas[None]).float())
+        joints_3d = copy2cpu(mesh['joints'][0])
+        verts = copy2cpu(mesh['vertices'][0])
+        # joints_3d = self.labels['S'][idx]
+        joints_2d = self.labels['part'][idx]
         
         # masking tokens
         joint_mask = self.gen_mask(num_mask=24, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
         vert_mask = self.gen_mask(num_mask=431, mask_ratio=self.args.mask_ratio).unsqueeze(-1)
         pelvis_idx = 0
         
+        orig_imgs = {}
+        trans_mat = {}
+        joints_2d_dict = {}
+        img = cv2.imread(os.path.join(self.data_path, self.labels['imgname'][idx]))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        box_scale = int(self.labels['scale'][idx] * 100)
+        center = self.labels['center'][idx].astype(int)
+        box_min, box_max = center - box_scale, center + box_scale
+        box_min, box_max = [np.where(p > 0, p, 0) for p in [box_min, box_max]]
+        box_min, box_max = [np.where(p < img.shape[1::-1], p, img.shape[1::-1]) for p in [box_min, box_max]]
+        crop_img = img[box_min[1]:box_max[1], box_min[0]:box_max[0]]
+        crop_img = cv2.resize(crop_img, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
+        trans_img = self.process_image(crop_img)
+        result[self.args.joints_2d_loss] = trans_img
+        crop_img = np.transpose(crop_img.astype('float32'), (2,0,1))/255.0
+        crop_img = torch.from_numpy(crop_img).float()
+        orig_imgs[self.args.joints_2d_loss] = crop_img
+        
+        # joints_2d[:,:2] = 2. * (joints_2d[:,:2] - box_min) / (box_max - box_min) - 1
+        # joints_2d = torch.from_numpy(joints_2d).float()
+        joints_2d = torch.zeros(joints_2d.shape).float()
+        joints_2d_dict[self.args.joints_2d_loss] = joints_2d
         # process image
-        img = cv2.imread(os.path.join(self.data_path, 'crop_images', self.images[idx]))
-        result[self.args.inputs[0]] = self.process_image(img)
-        trans_mat = {self.args.inputs[0]:torch.ones([4,4])}
+        for image in self.args.input_dict['image']:
+            trans_mat[image] = torch.eye(4,4)
+            if image != self.args.joints_2d_loss:
+                result[image] = torch.zeros_like(trans_img)
+                orig_imgs[image] = torch.zeros_like(crop_img)
+                joints_2d_dict[image] = torch.zeros_like(joints_2d)
+        joints_3d = np.hstack((joints_3d, np.ones([joints_3d.shape[0], 1])))
         
         # return result
-        result['joints_3d'] = torch.from_numpy(joints).float()
-        result['root_pelvis'] = torch.from_numpy(joints[pelvis_idx]).float()
+        result['joints_3d'] = torch.from_numpy(joints_3d).float()
+        result['root_pelvis'] = torch.from_numpy(joints_3d[pelvis_idx]).float()
         result['vertices'] = torch.from_numpy(verts).float()
+        result['joints_2d'] = joints_2d_dict
         result['trans_mat'] = trans_mat
+        result['orig_img'] = orig_imgs
 
         result['joint_mask'] = joint_mask
         result['vert_mask'] = vert_mask
+        
         return result
     
