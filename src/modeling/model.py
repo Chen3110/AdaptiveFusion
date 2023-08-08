@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from src.datasets.utils import INTRINSIC, gen_random_indices, project_pcl_torch
 from src.modeling.bert.transformer import FFN, PredictorLG, Transformer, TokenFusionTransformer
+import src.modeling.data.config as cfg
 
 
 class AdaptiveFusion(torch.nn.Module):
@@ -21,7 +22,7 @@ class AdaptiveFusion(torch.nn.Module):
         if args.mesh_type == 'smplx':
             self.upsampling = torch.nn.Linear(655, 2619)
             self.upsampling2 = torch.nn.Linear(2619, 10475)
-        elif args.mesh_type == 'smpl':
+        elif args.mesh_type == 'smpl' or args.mesh_type == 'smplh36m':
             self.upsampling = torch.nn.Linear(431, 1723)
             self.upsampling2 = torch.nn.Linear(1723, 6890)
         self.image_feat_dim = torch.nn.Linear(1024, 2051)
@@ -35,7 +36,7 @@ class AdaptiveFusion(torch.nn.Module):
             self.cam_param_fc = torch.nn.Linear(3, 1)
             if args.mesh_type == 'smplx':
                 self.cam_param_fc2 = torch.nn.Linear(655, 250)
-            elif args.mesh_type == 'smpl':
+            elif args.mesh_type == 'smpl' or args.mesh_type == 'smplh36m':
                 self.cam_param_fc2 = torch.nn.Linear(431, 250)
             self.cam_param_fc3 = torch.nn.Linear(250, 3)
         
@@ -554,27 +555,23 @@ class AdaptiveFusionH36M(AdaptiveFusion):
     def forward(self, args, data_dict, smpl, mesh_sampler, meta_masks=None, is_train=False, inputs=None):
         batch_size = data_dict['joints_3d'].shape[0]
         # Generate T-pose template mesh
-        if args.mesh_type == 'smplx':
-            template_pose = torch.zeros((1, 69)).cuda(args.device)
-            template_betas = torch.zeros((1, 16)).cuda(args.device)
-            num_joints = 22
-            num_verts = 655
-        elif args.mesh_type == 'smpl':
-            template_pose = torch.zeros((1, 75)).cuda(args.device)
-            template_betas = torch.zeros((1, 10)).cuda(args.device)
-            num_joints = 24
-            num_verts = 431
-        template_res = smpl(template_pose, template_betas)
-        template_vertices = template_res['vertices']
+        template_pose = torch.zeros((1,72))
+        template_pose[:,0] = 3.1416 # Rectify "upside down" reference mesh in global coord
+        template_pose = template_pose.cuda(args.device)
+        template_betas = torch.zeros((1,10)).cuda(args.device)
+        template_vertices = smpl(template_pose, template_betas)
 
         # template mesh simplification
         template_vertices_sub = mesh_sampler.downsample(template_vertices)
         template_vertices_sub2 = mesh_sampler.downsample(template_vertices_sub, n1=1, n2=2)
 
-        # template mesh-to-joint regression
-        template_3d_joints = template_res['joints'][:, :num_joints]
-        template_pelvis = template_3d_joints[:, 0, :]
-
+        # template mesh-to-joint regression 
+        template_3d_joints = smpl.get_h36m_joints(template_vertices)
+        template_pelvis = template_3d_joints[:,cfg.H36M_J17_NAME.index('Pelvis'),:]
+        template_3d_joints = template_3d_joints[:,cfg.H36M_J17_TO_J14,:]
+        num_joints = template_3d_joints.shape[1]
+        num_verts = template_vertices_sub2.shape[1]
+        
         # normalize
         template_3d_joints = template_3d_joints - template_pelvis[:, None, :]
         template_vertices_sub2 = template_vertices_sub2 - template_pelvis[:, None, :]
@@ -588,9 +585,13 @@ class AdaptiveFusionH36M(AdaptiveFusion):
         cluster_centers = {}
         
         # extract global and local features
-        for input in inputs:
+        for input in args.inputs:
             if data_dict[input].shape[1]:
-                global_feat, local_feat = self.process_image(data_dict[input], pos_emb=int(input[-1]))
+                if input in args.input_dict['image']:
+                    global_feat, local_feat = self.process_image(data_dict[input], pos_emb=int(input[-1]))
+                else:
+                    global_feat, local_feat, xyz = self.process_point(data_dict[input], input=input, use_point_feat=args.use_point_feat)
+                    cluster_centers[input] = xyz
                 global_feats.append(global_feat)
                 local_feats.append(local_feat)
                 
@@ -630,6 +631,15 @@ class AdaptiveFusionH36M(AdaptiveFusion):
         pred_vertices_full = self.upsampling2(pred_vertices_sub)
         pred_vertices_sub = pred_vertices_sub.transpose(1,2)
         pred_vertices_full = pred_vertices_full.transpose(1,2)
+        
+        if args.joints_2d_loss:
+            x = self.cam_param_fc(pred_vertices_sub2)
+            x = x.transpose(1,2)
+            x = self.cam_param_fc2(x)
+            x = self.cam_param_fc3(x)
+            cam_param = x.transpose(1,2)
+            cam_param = cam_param.squeeze()
+            pred_dict['camera'] = cam_param
         
         return pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 

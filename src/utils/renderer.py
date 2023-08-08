@@ -220,8 +220,8 @@ def draw_skeleton(input_image, joints, draw_edges=True, vis=None, radius=None):
                 print('bad')
                 import ipdb
                 ipdb.set_trace()
-            # cv2.line(image, (point[0], point[1]), (point_pa[0], point_pa[1]),
-            #          colors[ecolors[child]], radius - 2)
+            cv2.line(image, (point[0], point[1]), (point_pa[0], point_pa[1]),
+                     colors[ecolors[child]], radius - 2)
 
     # Convert back in original dtype
     if input_is_float:
@@ -288,7 +288,7 @@ def visualize_reconstruction_test(img, img_size, gt_kp, vertices, pred_kp, camer
     Draws vert with text.
     Renderer is an instance of SMPLRenderer.
     """
-    # gt_vis = gt_kp[:, 2].astype(bool)
+    gt_vis = gt_kp[:, 2].astype(bool)
     loss = np.sum((gt_kp - pred_kp)**2)
     debug_text = {"sc": camera[0], "tx": camera[1], "ty": camera[2], "kpl": loss, "pa-mpjpe": score*1000}
     # Fix a flength so i can render this with persp correct scale

@@ -149,6 +149,11 @@ class GraphormerLayer(nn.Module):
                 vertices = attention_output[:,24:455,:]
                 modal_tokens = attention_output[:,455:,:]
 
+            elif self.mesh_type == 'smplh36m':
+                joints = attention_output[:,0:14,:]
+                vertices = attention_output[:,14:445,:]
+                modal_tokens = attention_output[:,445:,:]
+
             vertices = self.graph_conv(vertices)
             joints_vertices = torch.cat([joints,vertices,modal_tokens],dim=1)
         else:

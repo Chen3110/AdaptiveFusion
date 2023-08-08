@@ -340,3 +340,66 @@ class SMPLXMesh(Mesh):
 
         self._ref_vertices = ref_vertices.to(device)
         self.faces = smpl.f.int().to(device)
+
+class SMPLH36M(SMPL):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pose, beta):
+        device = pose.device
+        batch_size = pose.shape[0]
+        v_template = self.v_template[None, :]
+        shapedirs = self.shapedirs.view(-1,10)[None, :].expand(batch_size, -1, -1)
+        beta = beta[:, :, None]
+        v_shaped = torch.matmul(shapedirs, beta).view(-1, 6890, 3) + v_template
+        # batched sparse matmul not supported in pytorch
+        J = []
+        for i in range(batch_size):
+            J.append(torch.matmul(self.J_regressor, v_shaped[i]))
+        J = torch.stack(J, dim=0)
+        # input it rotmat: (bs,24,3,3)
+        if pose.ndimension() == 4:
+            R = pose
+        # input it rotmat: (bs,72)
+        elif pose.ndimension() == 2:
+            pose_cube = pose.view(-1, 3) # (batch_size * 24, 1, 3)
+            R = rodrigues(pose_cube).view(batch_size, 24, 3, 3)
+            R = R.view(batch_size, 24, 3, 3)
+        I_cube = torch.eye(3)[None, None, :].to(device)
+        # I_cube = torch.eye(3)[None, None, :].expand(theta.shape[0], R.shape[1]-1, -1, -1)
+        lrotmin = (R[:,1:,:] - I_cube).view(batch_size, -1)
+        posedirs = self.posedirs.view(-1,207)[None, :].expand(batch_size, -1, -1)
+        v_posed = v_shaped + torch.matmul(posedirs, lrotmin[:, :, None]).view(-1, 6890, 3)
+        J_ = J.clone()
+        J_[:, 1:, :] = J[:, 1:, :] - J[:, self.parent, :]
+        G_ = torch.cat([R, J_[:, :, :, None]], dim=-1)
+        pad_row = torch.FloatTensor([0,0,0,1]).to(device).view(1,1,1,4).expand(batch_size, 24, -1, -1)
+        G_ = torch.cat([G_, pad_row], dim=2)
+        G = [G_[:, 0].clone()]
+        for i in range(1, 24):
+            G.append(torch.matmul(G[self.parent[i-1]], G_[:, i, :, :]))
+        G = torch.stack(G, dim=1)
+
+        rest = torch.cat([J, torch.zeros(batch_size, 24, 1).to(device)], dim=2).view(batch_size, 24, 4, 1)
+        zeros = torch.zeros(batch_size, 24, 4, 3).to(device)
+        rest = torch.cat([zeros, rest], dim=-1)
+        rest = torch.matmul(G, rest)
+        G = G - rest
+        T = torch.matmul(self.weights, G.permute(1,0,2,3).contiguous().view(24,-1)).view(6890, batch_size, 4, 4).transpose(0,1)
+        rest_shape_h = torch.cat([v_posed, torch.ones_like(v_posed)[:, :, [0]]], dim=-1)
+        v = torch.matmul(T, rest_shape_h[:, :, :, None])[:, :, :3, 0]
+        return v
+
+    def get_joints(self, vertices):
+        """
+        This method is used to get the joint locations from the SMPL mesh
+        Input:
+            vertices: size = (B, 6890, 3)
+        Output:
+            3D joints: size = (B, 38, 3)
+        """
+        joints = torch.einsum('bik,ji->bjk', [vertices, self.J_regressor])
+        joints_extra = torch.einsum('bik,ji->bjk', [vertices, self.J_regressor_extra])
+        joints = torch.cat((joints, joints_extra), dim=1)
+        joints = joints[:, cfg.JOINTS_IDX]
+        return joints

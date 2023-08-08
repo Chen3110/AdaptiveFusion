@@ -111,7 +111,7 @@ class GraphConvolution(torch.nn.Module):
 
         if mesh=='smplx':
             self.adjmat = torch.load('./src/modeling/data/smplx_655_adjmat.pt')
-        elif mesh=='smpl':
+        elif mesh=='smpl' or mesh=='smplh36m':
             self.adjmat = torch.load('./src/modeling/data/smpl_431_adjmat.pt')
             # adj_indices = torch.load('./src/modeling/data/smpl_431_adjmat_indices.pt')
             # adj_mat_value = torch.load('./src/modeling/data/smpl_431_adjmat_values.pt')

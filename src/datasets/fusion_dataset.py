@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 from src.datasets.utils import *
-from src.modeling._smpl import SMPL
+from src.modeling._smpl import SMPL, SMPLH36M
 
 
 class mmBodyDataset():
@@ -298,9 +298,8 @@ class Human36MDataset(BEHAVEDataset):
         
     def init_index_map(self):
         self.index_map = [0,]
-        # self.data_path = self.data_path.replace('test', 'train')
-        self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p[0]=='s']
-        # self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p=='s_01_act_02_subact_01']
+        # self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p[0]=='s']
+        self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p=='s_01_act_02_subact_01']
         self.seq_paths.sort()
         
         self.seq_loaders = {}
@@ -428,3 +427,61 @@ class CLIFFDataset(mmBodyDataset):
         
         return result
     
+
+from src.utils.image_ops import img_from_base64, crop, flip_img, flip_pose, flip_kp, transform, rot_aa
+
+class Human36M(Human36MDataset):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.smpl_model = kwargs.get('smpl_model', SMPLH36M())
+
+    def load_data(self, seq_loader, frame_idx):
+        frame = seq_loader[frame_idx]
+        # get mesh parameters
+        smpl_para = dict(frame['mesh'])
+        pose = smpl_para['pose']
+        betas = smpl_para['shape']
+        verts = self.smpl_model(torch.from_numpy(pose[None]).float(), torch.from_numpy(betas[None]).float())
+        joints_3d = self.smpl_model.get_joints(verts)
+        joints_3d = copy2cpu(joints_3d[0]) + smpl_para['trans'][0]
+        verts = copy2cpu(verts[0])
+        joints_h36m = frame['joints_h36m']
+        result = {}
+        
+        # masking tokens
+        joint_mask = self.gen_mask(num_mask=14, mask_ratio=0.3).unsqueeze(-1)
+        vert_mask = self.gen_mask(num_mask=431, mask_ratio=0.3).unsqueeze(-1)
+        pelvis_idx = 14
+
+        trans_mat = {}
+        joints_2d = {}
+        orig_imgs = {}
+        # process image
+        for image in self.args.input_dict['image']:
+            result[image], orig_imgs[image], box_min, box_max = self.process_image(frame[image], joints_h36m, seq_loader.calib[image], need_crop=True)
+            trans_mat[image] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[image])).float()
+            box_min, box_max = box_min[::-1], box_max[::-1]
+            joint_2d = project_pcl(joints_3d, trans_mat=seq_loader.calib[image], image_size=[1000,1002], return_int=False)
+            joint_2d[:,:2] = 2. * (joint_2d[:,:2] - box_min) / (box_max - box_min) - 1
+            joints_2d[image] = torch.from_numpy(joint_2d).float()
+        if self.args.joints_2d_loss:
+            joints_2d_trans_mat = seq_loader.calib[self.args.joints_2d_loss]
+            joints_3d = (joints_3d - joints_2d_trans_mat['t']) @ joints_2d_trans_mat['R']
+            verts = (verts - joints_2d_trans_mat['t']) @ joints_2d_trans_mat['R']
+        joints_3d = np.hstack((joints_3d, np.ones([joints_3d.shape[0], 1])))
+        
+        # return result
+        result['has_2d_joints'] = 1
+        result['has_3d_joints'] = 1
+        result['has_smpl'] = 1
+        result['root_pelvis'] = torch.from_numpy(joints_3d[pelvis_idx]).float()
+        result['joints_3d'] = torch.from_numpy(joints_3d).float()
+        result['vertices'] = torch.from_numpy(verts).float()
+        result['joints_2d'] = joints_2d
+        result['trans_mat'] = trans_mat
+        result['orig_img'] = orig_imgs
+
+        result['joint_mask'] = joint_mask
+        result['vert_mask'] = vert_mask
+        
+        return result
