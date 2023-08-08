@@ -1,5 +1,6 @@
 from __future__ import absolute_import, division, print_function
 import argparse
+from copy import deepcopy
 import os
 import os.path as op
 import code
@@ -14,10 +15,11 @@ import cv2
 from openpyxl import load_workbook, Workbook
 from torchvision.utils import make_grid
 from src.datasets.utils import copy2cpu, crop_image, project_pcl, trans_mat_2_dict, INTRINSIC
+from torch.utils.tensorboard import SummaryWriter
 
 from src.modeling.bert import BertConfig, Graphormer
 import src.modeling.model as Models
-from src.modeling._smpl import SMPL, SMPLX, Mesh, SMPLXMesh
+from src.modeling._smpl import SMPL, SMPLX, SMPLH36M, Mesh, SMPLXMesh
 from src.modeling.hrnet.hrnet_cls_net_gridfeat import get_cls_net_gridfeat
 from src.modeling.hrnet.config import config as hrnet_config
 from src.modeling.hrnet.config import update_config as hrnet_update_config
@@ -278,9 +280,10 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                 ).format(o=args.local_rank, a=max_iter, b=iters_per_epoch, c=args.num_train_epochs)
             )
 
-    ding_bot = TimerBot()
-    loss_manager_train = LossManager(ding_bot)
-    loss_manager_eval = LossManager(ding_bot)
+    TIMESTAMP = "{0:%Y-%m-%dT%H-%M-%S/}".format(datetime.datetime.now())
+    loss_manager_train = SummaryWriter(args.output_dir + '/loss/train/' + TIMESTAMP)
+    loss_manager_eval = SummaryWriter(args.output_dir + '/loss/eval/' + TIMESTAMP)
+    
     renderer = Renderer(faces=smpl.faces.cpu().numpy())
     
     start_training_time = time.time()
@@ -339,23 +342,26 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         loss_vertices = (args.vloss_w_sub2 * vertices_loss(criterion_vertices, pred_vertices_sub2, gt_vertices_sub2, args.device) + \
                             args.vloss_w_sub * vertices_loss(criterion_vertices, pred_vertices_sub, gt_vertices_sub, args.device) + \
                             args.vloss_w_full * vertices_loss(criterion_vertices, pred_vertices, gt_vertices, args.device))
+
+        loss_manager_train.add_scalar("3d_joint_loss", loss_3d_joints.item(), iteration)
+        loss_manager_train.add_scalar("vertex_loss", loss_vertices.item(), iteration)
+        
+        # we empirically use hyperparameters to balance difference losses
+        loss = args.joints_loss_weight*loss_3d_joints + args.vertices_loss_weight*loss_vertices
+        
         if args.joints_2d_loss:
             gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].float().to(args.device)
             pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
             loss_2d_joints = keypoint_2d_loss(criterion_2d_keypoints, pred_2d_joints, gt_2d_joints)
-            loss_manager_train.update_loss("2d_joint_loss", args.joints_loss_weight*loss_2d_joints)
             log_loss_2djoints.update(loss_2d_joints.item(), batch_size)
-        
-        loss_manager_train.update_loss("3d_joint_loss", args.joints_loss_weight*loss_3d_joints)
-        loss_manager_train.update_loss("vertex_loss", args.vertices_loss_weight*loss_vertices)
+            loss_manager_train.add_scalar("2d_joint_loss", loss_2d_joints.item(), iteration)
+            loss += args.vertices_loss_weight*loss_2d_joints
         
         if args.model == 'TokenFusion':
             score_loss = torch.sum(torch.abs(pred_dict.get('pred_score', torch.zeros(1).cuda())))
-            loss_manager_train.update_loss("score_loss", 1e-3*score_loss)
+            loss_manager_train.add_scalar("score_loss", score_loss.item(), iteration)
+            loss += 1e-3*score_loss
         
-        # we empirically use hyperparameters to balance difference losses
-        loss = loss_manager_train.calculate_total_loss()
-
         # update logs
         log_loss_3djoints.update(loss_3d_joints.item(), batch_size)
         log_loss_vertices.update(loss_vertices.item(), batch_size)
@@ -405,8 +411,6 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                     aml_run.log_image(name='visual results', path=temp_fname)
                 
         if iteration % iters_per_epoch == 0:
-            if is_main_process():
-                loss_manager_train.calculate_epoch_loss(os.path.join(args.output_dir, 'loss/train'), epoch, args.gpu_idx)
             val_mPVE, val_mPJPE, val_PAmPJPE, val_count = run_validate(args, val_dataloader, 
                                                 fusiuon_model, 
                                                 epoch, 
@@ -584,10 +588,9 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                 PAmPJPE.update(np.mean(error_joints_pa))
 
             if loss_manager is not None:
-                loss_manager.update_loss("mPVE", np.mean(error_vertices))
-                loss_manager.update_loss("mPJPE", np.mean(error_joints))
-                loss_manager.update_loss("PAmPJPE", np.mean(error_joints_pa))
-                loss_manager.calculate_total_loss()
+                loss_manager.add_scalar("mPVE", np.mean(error_vertices))
+                loss_manager.add_scalar("mPJPE", np.mean(error_joints))
+                loss_manager.add_scalar("PAmPJPE", np.mean(error_joints_pa))
 
             if args.visual and not args.train:
                 attention = pred_dict.get('attention', None)
@@ -604,9 +607,6 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                     print('batch_id:', i)
                     plot.show(gen)
 
-    if loss_manager is not None and is_main_process():
-        loss_manager.calculate_epoch_loss(os.path.join(args.output_dir, 'loss/eval'), epoch, args.gpu_idx)
-    
     val_mPVE = all_gather(float(mPVE.avg))
     val_mPVE = sum(val_mPVE)/len(val_mPVE)
     val_mPJPE = all_gather(float(mPJPE.avg))
@@ -709,6 +709,10 @@ def main(args):
         smpl = SMPL().to(args.device)
         mesh_sampler = Mesh()
         max_position_embeddings = 455
+    elif args.mesh_type == 'smplh36m':
+        smpl = SMPLH36M().to(args.device)
+        mesh_sampler = Mesh()
+        max_position_embeddings = 512
     # Load model
     trans_encoder = []
 
@@ -838,9 +842,15 @@ def main(args):
                 Datasets.CLIFFDataset(args, data_path='/remote-home/chenanjun/dataset/mpii'),
             ]
             dataset = torch.utils.data.ConcatDataset(datasets)
-        train_size = int(0.9 * len(dataset))
-        eval_size = len(dataset) - train_size
-        dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
+        if args.eval_test_dataset:
+            dataset_train = dataset
+            eval_args = deepcopy(args)
+            eval_args.train = False
+            dataset_eval = Dataset(eval_args)
+        else:
+            train_size = int(0.9 * len(dataset))
+            eval_size = len(dataset) - train_size
+            dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
         train_dataloader = make_data_loader(args, dataset_train, args.distributed, is_train=True, 
                                             scale_factor=args.img_scale_factor)
         val_dataloader = make_data_loader(args, dataset_eval, args.distributed, is_train=False, 
@@ -879,6 +889,7 @@ def parse_args():
     parser.add_argument('--point_mask_ratio', type=float, default=0.99)
     parser.add_argument('--num_mask_limbs', type=int, default=None)
     parser.add_argument('--mix_data', action="store_true")
+    parser.add_argument('--eval_test_dataset', action="store_true")
     #########################################################
     # Loading/saving checkpoints
     #########################################################
