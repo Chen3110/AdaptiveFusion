@@ -174,7 +174,35 @@ class Human36MSequenceLoader(object):
             
         return result
 
+class Human36MDatasetLoader(object):
+    def __init__(self, seq_path: str, calib, smpl_para=None, joints_3d=None, skip_head=0, skip_tail=0):
+        self.seq_path = seq_path
+        self.skip_head = skip_head
+        self.skip_tail = skip_tail
+        self.seq_name = str.split(seq_path, '/')[-1]
+        self.calib = calib
+        self.smpl_frames = list(smpl_para.keys())
+        self.smpl_frames.sort(key=lambda x:int(x))
+        self.smpl_para = smpl_para
+        self.joints_3d = joints_3d
 
+    def __len__(self):
+        return len(self.joints_3d) - self.skip_head - self.skip_tail
+    
+    def __getitem__(self, idx: int):
+        result = {}
+        result['joints_3d'] = self.joints_3d[idx]
+        for cam in range(1,5):
+            result['image{}'.format(cam)] = cv2.imread(os.path.join(
+                '{}{}'.format(self.seq_path, cam), '{}{}_{:0>6d}.jpg'.format(self.seq_name, cam, idx+1)))
+        if str(idx) in self.smpl_frames:
+            result['smpl_para'] = self.smpl_para[str(idx)]
+            result['has_mesh'] = 1
+        else:
+            result['has_mesh'] = 1
+            
+        return result
+    
 def conv_ply_2_arr(ply_path, return_rgb=True):
     plydata = plyfile.PlyData.read(ply_path)
     x = plydata['vertex']['x']

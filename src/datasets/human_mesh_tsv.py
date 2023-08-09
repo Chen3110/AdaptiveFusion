@@ -258,7 +258,7 @@ class MeshTSVDataset(object):
         transfromed_img = self.normalize_img(img)
         
         meta_data = {}
-        meta_data['image0'] = transfromed_img
+        meta_data['image4'] = transfromed_img
         meta_data['image_keys'] = img_key
         if 'human3.6m' in self.img_file:
             if self.is_train:

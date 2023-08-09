@@ -74,7 +74,8 @@ def make_data_sampler(dataset, shuffle, distributed):
 
 def make_data_loader(args, dataset, is_distributed=True, 
         is_train=True, start_iter=0, scale_factor=1):
-
+    if isinstance(dataset, str):
+        dataset = build_dataset(dataset, args, is_train=is_train, scale_factor=scale_factor)
     logger = logging.getLogger(__name__)
     if is_train==True:
         shuffle = True

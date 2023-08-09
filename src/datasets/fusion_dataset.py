@@ -298,8 +298,8 @@ class Human36MDataset(BEHAVEDataset):
         
     def init_index_map(self):
         self.index_map = [0,]
-        # self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p[0]=='s']
-        self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p=='s_01_act_02_subact_01']
+        self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p[0]=='s']
+        # self.seq_paths = [op.join(self.data_path, p) for p in os.listdir(self.data_path) if p=='s_01_act_02_subact_01']
         self.seq_paths.sort()
         
         self.seq_loaders = {}
@@ -474,6 +474,103 @@ class Human36M(Human36MDataset):
         result['has_2d_joints'] = 1
         result['has_3d_joints'] = 1
         result['has_smpl'] = 1
+        result['root_pelvis'] = torch.from_numpy(joints_3d[pelvis_idx]).float()
+        result['joints_3d'] = torch.from_numpy(joints_3d).float()
+        result['vertices'] = torch.from_numpy(verts).float()
+        result['joints_2d'] = joints_2d
+        result['trans_mat'] = trans_mat
+        result['orig_img'] = orig_imgs
+
+        result['joint_mask'] = joint_mask
+        result['vert_mask'] = vert_mask
+        
+        return result
+
+class Human36MOrig(Human36MDataset):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.smpl_model = kwargs.get('smpl_model', SMPLH36M())
+    
+    def init_index_map(self):
+        sub_idx = [1, 5, 6, 7, 8] if self.args.train else [9, 11]
+        calibs = {}
+        mesh_params = {}
+        joints_3d_h36m = {}
+        self.seq_loaders = {}
+        self.index_map = [0,]
+        
+        for sub in sub_idx:
+            calib = {}
+            with open(os.path.join(self.args.data_path, 'annotations', 'Human36M_subject{}_camera.json'.format(sub)), 'r') as f:
+                config = json.load(f)
+            for cam in range(1,5):
+                calib['camera{}'.format(cam)] = {}
+                R = np.array(config[str(cam)]['R']).reshape(3,3)
+                t = np.array(config[str(cam)]['t']) / 1000
+                calib['camera{}'.format(cam)]['R'] = R.T.tolist()
+                calib['camera{}'.format(cam)]['t'] = (-t @ R).tolist()
+                calib['camera{}'.format(cam)]['K'] = [
+                    [config[str(cam)]['f'][0], 0,                        config[str(cam)]['c'][0]],
+                    [0,                        config[str(cam)]['f'][1], config[str(cam)]['c'][1]],
+                    [0,                        0,                        1]]
+            calibs['sub{}'.format(sub)] = calib
+            with open(os.path.join(self.args.data_path, 'SMPL', 'Human36M_subject{}_smpl_param.json'.format(sub)), 'r') as f:
+                mesh_param = json.load(f)
+            mesh_params['{}'.format(sub)] = mesh_param
+            with open(os.path.join(self.args.data_path, 'annotations', 'Human36M_subject{}_joint_3d.json'.format(sub)), 'r') as f:
+                joint_3d = json.load(f)
+            joints_3d_h36m['{}'.format(sub)] = joint_3d
+            
+        for seq in os.listdir(os.path.join(self.args.data_path, 'images')):
+            indices = str.split(seq, '_')
+            sub, act, sub_act = int(indices[1]), int(indices[3]), int(indices[5])
+            smpl_para = mesh_params[str(sub)][str(act)][str(sub_act)]
+            joints_3d = joints_3d_h36m[str(sub)][str(act)][str(sub_act)]
+            seq_loader = Human36MDatasetLoader(os.path.join(self.args.data_path, 'images', seq[:-1]), 
+                                               calibs['sub{}'.format(sub)], smpl_para=smpl_para, joints_3d=joints_3d)
+            self.seq_loaders.update({seq[:-6]:seq_loader})
+            self.index_map.append(self.index_map[-1] + len(seq_loader))
+            
+    def load_data(self, seq_loader, frame_idx):
+        frame = seq_loader[frame_idx]
+        # get mesh parameters
+        has_smpl = frame['has_smpl']
+        smpl_para = frame['smpl_para']
+        pose = smpl_para['pose']
+        betas = smpl_para['shape']
+        verts = self.smpl_model(torch.from_numpy(pose[None]).float(), torch.from_numpy(betas[None]).float())
+        joints_3d = self.smpl_model.get_joints(verts)
+        joints_3d = copy2cpu(joints_3d[0]) + smpl_para['trans'][0]
+        verts = copy2cpu(verts[0])
+        joints_h36m = frame['joints_3d']
+        result = {}
+        
+        # masking tokens
+        joint_mask = self.gen_mask(num_mask=14, mask_ratio=0.3).unsqueeze(-1)
+        vert_mask = self.gen_mask(num_mask=431, mask_ratio=0.3).unsqueeze(-1)
+        pelvis_idx = 14
+
+        trans_mat = {}
+        joints_2d = {}
+        orig_imgs = {}
+        # process image
+        for image in self.args.input_dict['image']:
+            result[image], orig_imgs[image], box_min, box_max = self.process_image(frame[image], joints_h36m, seq_loader.calib[image], need_crop=True)
+            trans_mat[image] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[image])).float()
+            box_min, box_max = box_min[::-1], box_max[::-1]
+            joint_2d = project_pcl(joints_3d, trans_mat=seq_loader.calib[image], image_size=[1000,1002], return_int=False)
+            joint_2d[:,:2] = 2. * (joint_2d[:,:2] - box_min) / (box_max - box_min) - 1
+            joints_2d[image] = torch.from_numpy(joint_2d).float()
+        if self.args.joints_2d_loss:
+            joints_2d_trans_mat = seq_loader.calib[self.args.joints_2d_loss]
+            joints_3d = (joints_3d - joints_2d_trans_mat['t']) @ joints_2d_trans_mat['R']
+            verts = (verts - joints_2d_trans_mat['t']) @ joints_2d_trans_mat['R']
+        joints_3d = np.hstack((joints_3d, np.ones([joints_3d.shape[0], 1])))
+        
+        # return result
+        result['has_2d_joints'] = 1
+        result['has_3d_joints'] = 1
+        result['has_smpl'] = has_smpl
         result['root_pelvis'] = torch.from_numpy(joints_3d[pelvis_idx]).float()
         result['joints_3d'] = torch.from_numpy(joints_3d).float()
         result['vertices'] = torch.from_numpy(verts).float()
