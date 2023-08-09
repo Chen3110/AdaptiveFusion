@@ -35,7 +35,7 @@ from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.metric_pampjpe import reconstruction_error
 import src.datasets.fusion_dataset as Datasets
 from src.utils.loss import LossManager
-from src.utils.renderer import Renderer, visualize_reconstruction, visualize_reconstruction_no_text
+from src.utils.renderer import Renderer, visualize_reconstruction, visualize_reconstruction_no_text, visualize_reconstruction_test
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
 from src.utils.dingtalk import TimerBot
@@ -156,6 +156,35 @@ def visualize_mesh(renderer, images, gt_keypoints_2d, pred_vertices, pred_camera
     rend_imgs = make_grid(rend_imgs, nrow=1)
     return rend_imgs
 
+def visualize_mesh_test(renderer,
+                        images,
+                        gt_keypoints_2d,
+                        pred_vertices, 
+                        pred_camera,
+                        pred_keypoints_2d,
+                        PAmPJPE_h36m_j14):
+    """Tensorboard logging."""
+    gt_keypoints_2d = gt_keypoints_2d.cpu().numpy()
+    to_lsp = list(range(14))
+    rend_imgs = []
+    batch_size = pred_vertices.shape[0]
+    # Do visualization for the first 6 images of the batch
+    for i in range(min(batch_size, 10)):
+        img = images[i].cpu().numpy().transpose(1,2,0)
+        # Get LSP keypoints from the full list of keypoints
+        gt_keypoints_2d_ = gt_keypoints_2d[i, to_lsp]
+        pred_keypoints_2d_ = pred_keypoints_2d.cpu().numpy()[i, to_lsp]
+        # Get predict vertices for the particular example
+        vertices = pred_vertices[i].cpu().numpy()
+        cam = pred_camera[i].cpu().numpy()
+        score = PAmPJPE_h36m_j14[i]
+        # Visualize reconstruction and detected pose
+        rend_img = visualize_reconstruction_test(img, 224, gt_keypoints_2d_, vertices, pred_keypoints_2d_, cam, renderer, score)
+        rend_img = rend_img.transpose(2,0,1)
+        rend_imgs.append(torch.from_numpy(rend_img))   
+    rend_imgs = make_grid(rend_imgs, nrow=1)
+    return rend_imgs
+
 def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attention=None, 
                      cluster_centers=None, pred_verts_sub2=None, pred_joints=None, gt_pelvis=None):
     for k, v in data_dict.items():
@@ -243,7 +272,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
     log_eval_metrics = EvalMetricsLogger()
 
     for iteration, data_dict in enumerate(train_dataloader):
-        # gc.collect()
+            # gc.collect()
         # torch.cuda.empty_cache()
         fusiuon_model.train()
         iteration += start_iter + 1
@@ -251,50 +280,52 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         adjust_learning_rate(optimizer, epoch, args)
         data_time.update(time.time() - end)
 
-        # normalize gt joints
-        gt_3d_joints = data_dict['joints_3d'].to(args.device)
-        gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:3]
-        gt_3d_joints = gt_3d_joints[:,cfg.J24_TO_J14,:] 
-        gt_3d_joints[:,:,:3] -= gt_3d_pelvis
-        has_3d_joints = data_dict['has_3d_joints'].cuda(args.device)
-        batch_size = gt_3d_joints.shape[0]
-
-        gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].cuda(args.device)
+        gt_2d_joints = data_dict['joints_2d'].cuda(args.device)
         gt_2d_joints = gt_2d_joints[:,cfg.J24_TO_J14,:]
         has_2d_joints = data_dict['has_2d_joints'].cuda(args.device)
-        
-        joint_mask = data_dict['joint_mask'].to(args.device)
-        vert_mask = data_dict['vert_mask'].to(args.device)
+
+        gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
+        gt_3d_pelvis = gt_3d_joints[:,cfg.J24_NAME.index('Pelvis'),:3]
+        gt_3d_joints = gt_3d_joints[:,cfg.J24_TO_J14,:] 
+        gt_3d_joints[:,:,:3] = gt_3d_joints[:,:,:3] - gt_3d_pelvis[:, None, :]
+        has_3d_joints = data_dict['has_3d_joints'].cuda(args.device)
+        batch_size = gt_3d_joints.size(0)
+
+        gt_pose = data_dict['pose'].cuda(args.device)
+        gt_betas = data_dict['betas'].cuda(args.device)
+        has_smpl = data_dict['has_smpl'].cuda(args.device)
+        mjm_mask = data_dict['mjm_mask'].cuda(args.device)
+        mvm_mask = data_dict['mvm_mask'].cuda(args.device)
 
         # generate simplified mesh
-        has_smpl = data_dict['has_smpl'].cuda(args.device)
-        gt_vertices = data_dict['vertices'].to(args.device)
+        gt_vertices = smpl(gt_pose, gt_betas)
         gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices, n1=0, n2=2)
         gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
 
         # normalize gt based on smpl's pelvis 
         gt_smpl_3d_joints = smpl.get_h36m_joints(gt_vertices)
-        gt_smpl_3d_pelvis = gt_smpl_3d_joints[:,cfg.H36M_J17_NAME.index('Pelvis'),:][:,None,:]
+        gt_smpl_3d_pelvis = gt_smpl_3d_joints[:,cfg.H36M_J17_NAME.index('Pelvis'),:]
+        gt_vertices_sub2 = gt_vertices_sub2 - gt_smpl_3d_pelvis[:, None, :]
             
-        gt_vertices_sub2 -= gt_smpl_3d_pelvis
-        gt_vertices_sub -= gt_smpl_3d_pelvis
-        gt_vertices -= gt_smpl_3d_pelvis
+        # prepare masks for mask vertex/joint modeling
+        mjm_mask_ = mjm_mask.expand(-1,-1,2051)
+        mvm_mask_ = mvm_mask.expand(-1,-1,2051)
+        meta_masks = torch.cat([mjm_mask_, mvm_mask_], dim=1)
         
         for m in args.inputs:
             data_dict[m] = data_dict[m].to(args.device)
-
-        # prepare masks for mask vertex/joint modeling
-        joint_mask_ = joint_mask.expand(-1,-1,2051)
-        vert_mask_ = vert_mask.expand(-1,-1,2051)
-        meta_masks = torch.cat([joint_mask_, vert_mask_], dim=1)
-
+            
         # forward-pass
         pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices = fusiuon_model(args, data_dict, smpl, mesh_sampler, meta_masks=meta_masks, is_train=True)
+
+        # normalize gt based on smpl's pelvis 
+        gt_vertices_sub = gt_vertices_sub - gt_smpl_3d_pelvis[:, None, :] 
+        gt_vertices = gt_vertices - gt_smpl_3d_pelvis[:, None, :]
 
         # obtain 3d joints, which are regressed from the full mesh
         pred_3d_joints_from_smpl = smpl.get_h36m_joints(pred_vertices)
         pred_3d_joints_from_smpl = pred_3d_joints_from_smpl[:,cfg.H36M_J17_TO_J14,:]
-        
+
         # obtain 2d joints, which are projected from 3d joints of smpl mesh
         pred_2d_joints_from_smpl = orthographic_projection(pred_3d_joints_from_smpl, pred_dict['camera'])
         pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
@@ -355,11 +386,11 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
             aml_run.log(name='vertex Loss', value=float(log_loss_vertices.avg))
 
             visual_imgs = visualize_mesh(renderer,
-                                        data_dict['orig_img'][args.joints_2d_loss].detach(),
-                                        data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
+                                        data_dict['orig_img'].detach(),
+                                        data_dict['joints_2d'][:,:,:2].detach(),
                                         pred_vertices.detach(), 
                                         pred_dict['camera'].detach(),
-                                        pred_2d_joints.detach())
+                                        pred_2d_joints_from_smpl.detach())
             visual_imgs = visual_imgs.permute(1,2,0).numpy()
             
             if is_main_process():
@@ -449,28 +480,27 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
     with torch.no_grad():
         for i, data_dict in enumerate(val_loader):
             # compute output
-            
-            gt_3d_joints = data_dict['joints_3d'].to(args.device)
-            gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:3]
+            gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
+            gt_3d_pelvis = gt_3d_joints[:,cfg.J24_NAME.index('Pelvis'),:3]
             gt_3d_joints = gt_3d_joints[:,cfg.J24_TO_J14,:] 
-            gt_3d_joints[:,:,:3] -= gt_3d_pelvis
+            gt_3d_joints[:,:,:3] = gt_3d_joints[:,:,:3] - gt_3d_pelvis[:, None, :]
             has_3d_joints = data_dict['has_3d_joints'].cuda(args.device)
 
-            gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].cuda(args.device)
-            gt_2d_joints = gt_2d_joints[:,cfg.J24_TO_J14,:]
-            
-            # generate simplified mesh
+            gt_pose = data_dict['pose'].cuda(args.device)
+            gt_betas = data_dict['betas'].cuda(args.device)
             has_smpl = data_dict['has_smpl'].cuda(args.device)
-            gt_vertices = data_dict['vertices'].to(args.device)
-            gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices, n1=0, n2=2)
 
-            # normalize gt based on smpl's pelvis 
+            # generate simplified mesh
+            gt_vertices = smpl(gt_pose, gt_betas)
+            gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
+            gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices_sub, n1=1, n2=2)
+
+            # normalize gt based on smpl pelvis 
             gt_smpl_3d_joints = smpl.get_h36m_joints(gt_vertices)
-            gt_smpl_3d_pelvis = gt_smpl_3d_joints[:,cfg.H36M_J17_NAME.index('Pelvis'),:][:,None,:]
-                
-            gt_vertices_sub2 -= gt_smpl_3d_pelvis
-            gt_vertices -= gt_smpl_3d_pelvis
-            
+            gt_smpl_3d_pelvis = gt_smpl_3d_joints[:,cfg.H36M_J17_NAME.index('Pelvis'),:]
+            gt_vertices_sub2 = gt_vertices_sub2 - gt_smpl_3d_pelvis[:, None, :] 
+            gt_vertices = gt_vertices - gt_smpl_3d_pelvis[:, None, :] 
+
             for m in args.inputs:
                 data_dict[m] = data_dict[m].to(args.device)
                 
@@ -479,11 +509,11 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
 
             # obtain 3d joints from full mesh
             pred_3d_joints_from_smpl = smpl.get_h36m_joints(pred_vertices)
-            
-            pred_3d_pelvis = pred_3d_joints_from_smpl[:,cfg.H36M_J17_NAME.index('Pelvis'),:][:,None,:]
+
+            pred_3d_pelvis = pred_3d_joints_from_smpl[:,cfg.H36M_J17_NAME.index('Pelvis'),:]
             pred_3d_joints_from_smpl = pred_3d_joints_from_smpl[:,cfg.H36M_J17_TO_J14,:]
-            pred_3d_joints_from_smpl = pred_3d_joints_from_smpl - pred_3d_pelvis
-            pred_vertices = pred_vertices - pred_3d_pelvis
+            pred_3d_joints_from_smpl = pred_3d_joints_from_smpl - pred_3d_pelvis[:, None, :]
+            pred_vertices = pred_vertices - pred_3d_pelvis[:, None, :]
 
             # measure errors
             error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices, has_smpl)
@@ -507,19 +537,20 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                 if loss_manager is not None:
                     loss_manager.add_scalar('PA-MPJPE', np.mean(error_joints_pa))
                 
-            # if not args.train and args.joints_2d_loss and i%100==0:
-            #     pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
-            #     visual_imgs_output = visual_imgs = visualize_mesh(renderer,
-            #                                 data_dict['orig_img'][args.joints_2d_loss].detach(),
-            #                                 data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
-            #                                 pred_vertices.detach(), 
-            #                                 pred_dict['camera'].detach(),
-            #                                 pred_2d_joints.detach())
-            #     visual_imgs = visual_imgs_output.permute(1,2,0).numpy()
+            if not args.train and args.joints_2d_loss and i%100==0:
+                pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
+                visual_imgs_output = visual_imgs = visualize_mesh_test(renderer,
+                                            data_dict['orig_img'].detach(),
+                                            data_dict['joints_2d'][:,:,:2].detach(),
+                                            pred_vertices.detach(), 
+                                            pred_dict['camera'].detach(),
+                                            pred_2d_joints.detach(),
+                                            error_joints_pa)
+                visual_imgs = visual_imgs_output.permute(1,2,0).numpy()
                         
-            #     temp_fname = os.path.join(args.output_dir, 'snapshot', 'pred_{}.jpg'.format(i))
-            #     print('save to ', temp_fname)
-            #     cv2.imwrite(temp_fname, np.asarray(visual_imgs[:,:,::-1]*255))
+                temp_fname = os.path.join(args.output_dir, 'snapshot', 'pred_{}.jpg'.format(i))
+                print('save to ', temp_fname)
+                cv2.imwrite(temp_fname, np.asarray(visual_imgs[:,:,::-1]*255))
                 
             if args.visual and not args.train:
                 attention = pred_dict.get('attention', None)
@@ -749,34 +780,17 @@ def main(args):
 
     _model.to(args.device)
     logger.info("Training parameters %s", args)
-    Dataset = Datasets.Human36M
-    dataset = Dataset(args)
 
     if args.train==True:
-        if args.mix_data:
-            datasets = [
-                dataset,
-                Datasets.CLIFFDataset(args, data_path='/remote-home/chenanjun/dataset/COCO'),
-                Datasets.CLIFFDataset(args, data_path='/remote-home/chenanjun/dataset/mpii'),
-            ]
-            dataset = torch.utils.data.ConcatDataset(datasets)
-        if args.eval_test_dataset:
-            dataset_train = dataset
-            eval_args = deepcopy(args)
-            eval_args.train = False
-            dataset_eval = Dataset(eval_args)
-        else:
-            train_size = int(0.9 * len(dataset))
-            eval_size = len(dataset) - train_size
-            dataset_train, dataset_eval = torch.utils.data.random_split(dataset, [train_size, eval_size])
-        train_dataloader = make_data_loader(args, dataset_train, args.distributed, is_train=True, 
-                                            scale_factor=args.img_scale_factor)
-        val_dataloader = make_data_loader(args, dataset_eval, args.distributed, is_train=False, 
-                                            scale_factor=args.img_scale_factor)
+        train_dataloader = make_data_loader(args, args.train_yaml, 
+                                            args.distributed, is_train=True, scale_factor=args.img_scale_factor)
+        val_dataloader = make_data_loader(args, args.val_yaml, 
+                                        args.distributed, is_train=False, scale_factor=args.img_scale_factor)
         run_train(args, train_dataloader, val_dataloader, _model, smpl, mesh_sampler, start_epoch)
         
     else:
-        val_dataloader = make_data_loader(args, dataset, args.distributed, is_train=False, scale_factor=args.img_scale_factor)
+        val_dataloader = make_data_loader(args, args.val_yaml, 
+                                        args.distributed, is_train=False, scale_factor=args.img_scale_factor)
         run_eval_general(args, val_dataloader, _model, smpl, mesh_sampler)
 
 
@@ -785,8 +799,14 @@ def parse_args():
     #########################################################
     # Data related arguments
     #########################################################
+    parser.add_argument("--data_dir", default='/home/nesc525/drivers/4/chen/MeshGraphormer/datasets', type=str, required=False,
+                        help="Directory with all datasets, each in one subfolder")
     parser.add_argument("--data_path", default='/home/nesc525/drivers/6/mmBody', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
+    parser.add_argument("--train_yaml", default='human3.6m/train.smpl.p1.yaml', type=str, required=False,
+                        help="Yaml file with all data for training.")
+    parser.add_argument("--val_yaml", default='human3.6m/valid.protocol2.yaml', type=str, required=False,
+                        help="Yaml file with all data for validation.")
     parser.add_argument("--num_workers", default=4, type=int, 
                         help="Workers in dataloader.")
     parser.add_argument("--img_scale_factor", default=1, type=int, 
@@ -800,7 +820,7 @@ def parse_args():
     parser.add_argument('--add_rgb', action="store_true", help='add rgb values')
     parser.add_argument('--inputs', type=str, default='image0,image1,depth0,depth1,radar', help='input data')
     parser.add_argument('--trans_coor_to_cam', action="store_true")
-    parser.add_argument("--mesh_type", default='smplx', type=str, help="smplx or smpl") 
+    parser.add_argument("--mesh_type", default='smplh36m', type=str, help="smplx or smpl") 
     parser.add_argument('--mask_ratio', type=float, default=0.3)
     parser.add_argument('--num_clusters', type=int, default=49)
     parser.add_argument('--mask_limbs', action="store_true")
