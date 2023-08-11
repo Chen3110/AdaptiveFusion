@@ -260,29 +260,31 @@ class MeshTSVDataset(object):
         meta_data = {}
         meta_data['image4'] = transfromed_img
         meta_data['image_keys'] = img_key
-        if 'human3.6m' in self.img_file:
-            if self.is_train:
-                cam = img_key.split('.')[1].split('_')[0]
-                cam_list = ['54138969', '55011271', '58860488', '60457274']
-                cam_list.remove(cam)
-                for i, cam_ in enumerate(cam_list):
+        if 'images/S' in img_key and self.is_train:
+            cam = img_key.split('.')[1].split('_')[0]
+            cam_list = ['54138969', '55011271', '58860488', '60457274']
+            cam_list.remove(cam)
+            for i, cam_ in enumerate(cam_list):
+                if isinstance(self.hw_file, str):
                     img_key_ = img_key.replace(cam, cam_)
-                    idx_ = self.image_keys.index(img_key_)
-                    img_ = self.get_image(idx_)
-                    annotations_ = self.get_annotations(idx_)[0]
-                    center_ = annotations_['center']
-                    scale_ = annotations_['scale']
-                    img_ = self.rgb_processing(img_, center_, sc*scale_, rot, flip, pn)
-                    img_ = self.normalize_img(torch.from_numpy(img_).float())
-                    meta_data['image{}'.format(i+1)] = img_
-            else:
-                sub_act, cam_idx, _ = img_key.split('.')
-                sub = sub_act[7:9] if 'S11' not in sub_act else 'S11'
-                act = sub_act[10:] if 'S11' not in sub_act else sub_act[11:]
-                cam, id = cam_idx.split('_')
+                else:
+                    img_key_ = self.hw_file[0] + '_' + img_key.replace(cam, cam_)
+                idx_ = self.image_keys.index(img_key_)
+                img_ = self.get_image(idx_)
+                annotations_ = self.get_annotations(idx_)[0]
+                center_ = annotations_['center']
+                scale_ = annotations_['scale']
+                img_ = self.rgb_processing(img_, center_, sc*scale_, rot, flip, pn)
+                img_ = self.normalize_img(torch.from_numpy(img_).float())
+                meta_data['image{}'.format(i+1)] = img_
+            # else:
+            #     sub_act, cam_idx, _ = img_key.split('.')
+            #     sub = sub_act[7:9] if 'S11' not in sub_act else 'S11'
+            #     act = sub_act[10:] if 'S11' not in sub_act else sub_act[11:]
+            #     cam, id = cam_idx.split('_')
         else:
             for i in range(3):
-                meta_data['image{}'.format(i+1)] = torch.zeros_like(transfromed_img)
+                meta_data['image{}'.format(i+1)] = transfromed_img.copy()
                 
         # normalize 3d pose by aligning the pelvis as the root (at origin)
         root_pelvis = joints_3d[self.pelvis_index,:-1]

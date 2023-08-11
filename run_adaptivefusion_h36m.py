@@ -525,17 +525,17 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
             per_pampjpe.append(error_joints_pa)
 
             if len(error_vertices)>0:
-                mPVE.update(np.mean(error_vertices), int(torch.sum(has_smpl)) )
+                mPVE.update(np.mean(error_vertices), int(torch.sum(has_smpl)))
                 if loss_manager is not None:
-                    loss_manager.add_scalar('MPVE', np.mean(error_vertices))
+                    loss_manager.add_scalar('MPVE', np.mean(error_vertices), i)
             if len(error_joints)>0:
-                mPJPE.update(np.mean(error_joints), int(torch.sum(has_3d_joints)) )
+                mPJPE.update(np.mean(error_joints), int(torch.sum(has_3d_joints)))
                 if loss_manager is not None:
-                    loss_manager.add_scalar('MPJPE', np.mean(error_joints))
+                    loss_manager.add_scalar('MPJPE', np.mean(error_joints), i)
             if len(error_joints_pa)>0:
-                PAmPJPE.update(np.mean(error_joints_pa), int(torch.sum(has_3d_joints)) )
+                PAmPJPE.update(np.mean(error_joints_pa), int(torch.sum(has_3d_joints)))
                 if loss_manager is not None:
-                    loss_manager.add_scalar('PA-MPJPE', np.mean(error_joints_pa))
+                    loss_manager.add_scalar('PA-MPJPE', np.mean(error_joints_pa), i)
                 
             if not args.train and args.joints_2d_loss and i%100==0:
                 pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
