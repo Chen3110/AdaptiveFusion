@@ -72,6 +72,12 @@ def make_data_sampler(dataset, shuffle, distributed):
     return sampler
 
 
+def filter_none_collate_fn(batch):
+    batch = [item for item in batch if item is not None]
+    if len(batch) == 0:
+        return None
+    return torch.utils.data.dataloader.default_collate(batch)
+
 def make_data_loader(args, dataset, is_distributed=True, 
         is_train=True, start_iter=0, scale_factor=1):
     if isinstance(dataset, str):
@@ -98,7 +104,7 @@ def make_data_loader(args, dataset, is_distributed=True,
     )
     data_loader = torch.utils.data.DataLoader(
         dataset, num_workers=args.num_workers, batch_sampler=batch_sampler,
-        pin_memory=True,
+        pin_memory=True, collate_fn=filter_none_collate_fn
     )
     return data_loader
 

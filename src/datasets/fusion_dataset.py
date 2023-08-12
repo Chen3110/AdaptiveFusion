@@ -120,8 +120,9 @@ class mmBodyDataset():
             trans_mat[image] = torch.tensor(trans_mat_2_tensor(seq_loader.calib[image])).float()
             bbox[image] = frame['bbox{}'.format(image[-1])].reshape(-1)
             resize_ratio = [self.img_res, self.img_res] / (bbox[image][2:] - bbox[image][:2])
-            joints_2d[image] = ((project_pcl(joints_3d, trans_mat=seq_loader.calib[image], 
-                                intrinsic=INTRINSIC[image]) - bbox[image][0:2]) * resize_ratio).astype(np.int64)
+            if self.args.joints_2d_loss:
+                joints_2d[image] = ((project_pcl(joints_3d, trans_mat=seq_loader.calib[image], 
+                                    intrinsic=INTRINSIC[image]) - bbox[image][0:2]) * resize_ratio).astype(np.int64)
 
         # process depth pcl
         for depth in self.args.input_dict['depth']:

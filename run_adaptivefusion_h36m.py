@@ -701,6 +701,7 @@ def main(args):
             config.output_feature_dim = output_feat_dim[i]
             args.hidden_size = hidden_feat_dim[i]
             args.intermediate_size = int(args.hidden_size*args.interm_size_scale)
+            config.max_position_embeddings = 445
 
             if which_blk_graph[i]==1:
                 config.graph_conv = True

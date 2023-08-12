@@ -712,7 +712,7 @@ def main(args):
     elif args.mesh_type == 'smplh36m':
         smpl = SMPLH36M().to(args.device)
         mesh_sampler = Mesh()
-        max_position_embeddings = 512
+        max_position_embeddings = 445
     # Load model
     trans_encoder = []
 
