@@ -156,35 +156,6 @@ def visualize_mesh(renderer, images, gt_keypoints_2d, pred_vertices, pred_camera
     rend_imgs = make_grid(rend_imgs, nrow=1)
     return rend_imgs
 
-def visualize_mesh_test(renderer,
-                        images,
-                        gt_keypoints_2d,
-                        pred_vertices, 
-                        pred_camera,
-                        pred_keypoints_2d,
-                        PAmPJPE_h36m_j14):
-    """Tensorboard logging."""
-    gt_keypoints_2d = gt_keypoints_2d.cpu().numpy()
-    to_lsp = list(range(14))
-    rend_imgs = []
-    batch_size = pred_vertices.shape[0]
-    # Do visualization for the first 6 images of the batch
-    for i in range(min(batch_size, 10)):
-        img = images[i].cpu().numpy().transpose(1,2,0)
-        # Get LSP keypoints from the full list of keypoints
-        gt_keypoints_2d_ = gt_keypoints_2d[i, to_lsp]
-        pred_keypoints_2d_ = pred_keypoints_2d.cpu().numpy()[i, to_lsp]
-        # Get predict vertices for the particular example
-        vertices = pred_vertices[i].cpu().numpy()
-        cam = pred_camera[i].cpu().numpy()
-        score = PAmPJPE_h36m_j14[i]
-        # Visualize reconstruction and detected pose
-        rend_img = visualize_reconstruction_test(img, 224, gt_keypoints_2d_, vertices, pred_keypoints_2d_, cam, renderer, score)
-        rend_img = rend_img.transpose(2,0,1)
-        rend_imgs.append(torch.from_numpy(rend_img))   
-    rend_imgs = make_grid(rend_imgs, nrow=1)
-    return rend_imgs
-
 def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attention=None, 
                      cluster_centers=None, pred_verts_sub2=None, pred_joints=None, gt_pelvis=None):
     for k, v in data_dict.items():
@@ -375,8 +346,8 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                 ['eta: {eta}', 'epoch: {ep}', 'iter: {iter}', 'max mem : {memory:.0f}',]
                 ).format(eta=eta_string, ep=epoch, iter=iteration, 
                     memory=torch.cuda.max_memory_allocated() / 1024.0 / 1024.0) 
-                + '  loss: {:.4f}, 3d joint loss: {:.4f}, vertex loss: {:.4f}, compute: {:.4f}, data: {:.4f}, lr: {:.6f}'.format(
-                    log_losses.avg, log_loss_3djoints.avg, log_loss_vertices.avg, batch_time.avg, data_time.avg, 
+                + '  loss: {:.4f}, 2d joint loss: {:.4f}, 3d joint loss: {:.4f}, vertex loss: {:.4f}, compute: {:.4f}, data: {:.4f}, lr: {:.6f}'.format(
+                    log_losses.avg, log_loss_2djoints.avg, log_loss_3djoints.avg, log_loss_vertices.avg, batch_time.avg, data_time.avg, 
                     optimizer.param_groups[0]['lr'])
             )
 
@@ -407,11 +378,15 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                                                 epoch, 
                                                 smpl,
                                                 mesh_sampler,
-                                                loss_manager_eval)
+                                                )
             
             aml_run.log(name='mPVE', value=float(1000*val_mPVE))
             aml_run.log(name='mPJPE', value=float(1000*val_mPJPE))
             aml_run.log(name='PAmPJPE', value=float(1000*val_PAmPJPE))
+            loss_manager_eval.add_scalar('mPVE', float(1000*val_mPVE), epoch)
+            loss_manager_eval.add_scalar('mPJPE', float(1000*val_mPJPE), epoch)
+            loss_manager_eval.add_scalar('PAmPJPE', float(1000*val_PAmPJPE), epoch)
+            
             logger.info(
                 ' '.join(['Validation', 'epoch: {ep}',]).format(ep=epoch) 
                 + '  mPVE: {:6.2f}, mPJPE: {:6.2f}, PAmPJPE: {:6.2f}, Data Count: {:6.2f}'.format(1000*val_mPVE, 1000*val_mPJPE, 1000*val_PAmPJPE, val_count)
@@ -457,7 +432,7 @@ def run_eval_general(args, val_dataloader, fusion_model, smpl, mesh_sampler):
     )
     return
 
-def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss_manager=None):
+def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
     batch_time = AverageMeter()
     mPVE = AverageMeter()
     mPJPE = AverageMeter()
@@ -479,28 +454,30 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
     batch = 0
     with torch.no_grad():
         for i, data_dict in enumerate(val_loader):
+            if data_dict is None:
+                continue
             # compute output
-            gt_3d_joints = data_dict['joints_3d'].to(args.device)
-            gt_3d_pelvis = data_dict['root_pelvis'].to(args.device)[:,None,:3]
+            gt_3d_joints = data_dict['joints_3d'].cuda(args.device)
+            gt_3d_pelvis = gt_3d_joints[:,cfg.J24_NAME.index('Pelvis'),:3]
             gt_3d_joints = gt_3d_joints[:,cfg.J24_TO_J14,:] 
-            gt_3d_joints[:,:,:3] -= gt_3d_pelvis
+            gt_3d_joints[:,:,:3] = gt_3d_joints[:,:,:3] - gt_3d_pelvis[:, None, :]
             has_3d_joints = data_dict['has_3d_joints'].cuda(args.device)
 
-            gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].cuda(args.device)
-            gt_2d_joints = gt_2d_joints[:,cfg.J24_TO_J14,:]
-            
-            # generate simplified mesh
+            gt_pose = data_dict['pose'].cuda(args.device)
+            gt_betas = data_dict['betas'].cuda(args.device)
             has_smpl = data_dict['has_smpl'].cuda(args.device)
-            gt_vertices = data_dict['vertices'].to(args.device)
-            gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices, n1=0, n2=2)
 
-            # normalize gt based on smpl's pelvis 
+            # generate simplified mesh
+            gt_vertices = smpl(gt_pose, gt_betas)
+            gt_vertices_sub = mesh_sampler.downsample(gt_vertices)
+            gt_vertices_sub2 = mesh_sampler.downsample(gt_vertices_sub, n1=1, n2=2)
+
+            # normalize gt based on smpl pelvis 
             gt_smpl_3d_joints = smpl.get_h36m_joints(gt_vertices)
-            gt_smpl_3d_pelvis = gt_smpl_3d_joints[:,cfg.H36M_J17_NAME.index('Pelvis'),:][:,None,:]
-                
-            gt_vertices_sub2 -= gt_smpl_3d_pelvis
-            gt_vertices -= gt_smpl_3d_pelvis
-            
+            gt_smpl_3d_pelvis = gt_smpl_3d_joints[:,cfg.H36M_J17_NAME.index('Pelvis'),:]
+            gt_vertices_sub2 = gt_vertices_sub2 - gt_smpl_3d_pelvis[:, None, :] 
+            gt_vertices = gt_vertices - gt_smpl_3d_pelvis[:, None, :] 
+
             for m in args.inputs:
                 data_dict[m] = data_dict[m].to(args.device)
                 
@@ -509,11 +486,11 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
 
             # obtain 3d joints from full mesh
             pred_3d_joints_from_smpl = smpl.get_h36m_joints(pred_vertices)
-            
-            pred_3d_pelvis = pred_3d_joints_from_smpl[:,cfg.H36M_J17_NAME.index('Pelvis'),:][:,None,:]
+
+            pred_3d_pelvis = pred_3d_joints_from_smpl[:,cfg.H36M_J17_NAME.index('Pelvis'),:]
             pred_3d_joints_from_smpl = pred_3d_joints_from_smpl[:,cfg.H36M_J17_TO_J14,:]
-            pred_3d_joints_from_smpl = pred_3d_joints_from_smpl - pred_3d_pelvis
-            pred_vertices = pred_vertices - pred_3d_pelvis
+            pred_3d_joints_from_smpl = pred_3d_joints_from_smpl - pred_3d_pelvis[:, None, :]
+            pred_vertices = pred_vertices - pred_3d_pelvis[:, None, :]
 
             # measure errors
             error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices, has_smpl)
@@ -526,25 +503,20 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
 
             if len(error_vertices)>0:
                 mPVE.update(np.mean(error_vertices), int(torch.sum(has_smpl)))
-                if loss_manager is not None:
-                    loss_manager.add_scalar('MPVE', np.mean(error_vertices), i)
             if len(error_joints)>0:
                 mPJPE.update(np.mean(error_joints), int(torch.sum(has_3d_joints)))
-                if loss_manager is not None:
-                    loss_manager.add_scalar('MPJPE', np.mean(error_joints), i)
             if len(error_joints_pa)>0:
                 PAmPJPE.update(np.mean(error_joints_pa), int(torch.sum(has_3d_joints)))
-                if loss_manager is not None:
-                    loss_manager.add_scalar('PA-MPJPE', np.mean(error_joints_pa), i)
                 
-            if not args.train and args.joints_2d_loss and i%100==0:
+            if not args.train and i%100==0 and is_main_process():
                 pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
-                visual_imgs_output = visual_imgs = visualize_mesh(renderer,
-                                            data_dict['orig_img'][args.joints_2d_loss].detach(),
-                                            data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
+                visual_imgs_output = visualize_mesh(renderer,
+                                            data_dict['orig_img'].detach(),
+                                            data_dict['joints_2d'][:,:,:2].detach(),
                                             pred_vertices.detach(), 
                                             pred_dict['camera'].detach(),
-                                            pred_2d_joints.detach())
+                                            pred_2d_joints.detach(),
+                                            )
                 visual_imgs = visual_imgs_output.permute(1,2,0).numpy()
                         
                 temp_fname = os.path.join(args.output_dir, 'snapshot', 'pred_{}.jpg'.format(i))
@@ -578,7 +550,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
     val_count = sum(val_count)
 
     # save error
-    if not args.train:
+    if not args.train and is_main_process():
         output_path = os.path.join(args.output_dir, 'error', args.test_scene)
         if not os.path.isdir(output_path):
             os.makedirs(output_path)
@@ -780,21 +752,16 @@ def main(args):
 
     _model.to(args.device)
     logger.info("Training parameters %s", args)
-    Dataset = Datasets.Human36M
-    if args.eval_test_dataset:
-        eval_args = deepcopy(args)
-        eval_args.train = False
-        dataset_eval = Dataset(eval_args)
 
     if args.train==True:
         train_dataloader = make_data_loader(args, args.train_yaml, 
                                             args.distributed, is_train=True, scale_factor=args.img_scale_factor)
-        val_dataloader = make_data_loader(args, dataset_eval, 
+        val_dataloader = make_data_loader(args, args.val_yaml, 
                                         args.distributed, is_train=False, scale_factor=args.img_scale_factor)
         run_train(args, train_dataloader, val_dataloader, _model, smpl, mesh_sampler, start_epoch)
         
     else:
-        val_dataloader = make_data_loader(args, dataset_eval, 
+        val_dataloader = make_data_loader(args, args.val_yaml, 
                                         args.distributed, is_train=False, scale_factor=args.img_scale_factor)
         run_eval_general(args, val_dataloader, _model, smpl, mesh_sampler)
 
@@ -804,13 +771,11 @@ def parse_args():
     #########################################################
     # Data related arguments
     #########################################################
-    parser.add_argument("--data_dir", default='/home/nesc525/drivers/4/chen/MeshGraphormer/datasets', type=str, required=False,
+    parser.add_argument("--data_dir", default='datasets', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
-    parser.add_argument("--data_path", default='/home/nesc525/drivers/6/mmBody', type=str, required=False,
-                        help="Directory with all datasets, each in one subfolder")
-    parser.add_argument("--train_yaml", default='human3.6m/train.smpl.p1.yaml', type=str, required=False,
+    parser.add_argument("--train_yaml", default='Tax-H36m-coco40k-Muco-UP-Mpii/train.yaml', type=str, required=False,
                         help="Yaml file with all data for training.")
-    parser.add_argument("--val_yaml", default='human3.6m/valid.protocol2.yaml', type=str, required=False,
+    parser.add_argument("--val_yaml", default='human3.6m/valid.4images.yaml', type=str, required=False,
                         help="Yaml file with all data for validation.")
     parser.add_argument("--num_workers", default=4, type=int, 
                         help="Workers in dataloader.")
@@ -849,11 +814,11 @@ def parse_args():
     #########################################################
     parser.add_argument("--per_gpu_train_batch_size", default=10, type=int, 
                         help="Batch size per GPU/CPU for training.")
-    parser.add_argument("--per_gpu_eval_batch_size", default=10, type=int, 
+    parser.add_argument("--per_gpu_eval_batch_size", default=20, type=int, 
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument('--lr', "--learning_rate", default=1e-4, type=float, 
                         help="The initial lr.")
-    parser.add_argument("--num_train_epochs", default=50, type=int, 
+    parser.add_argument("--num_train_epochs", default=200, type=int, 
                         help="Total number of training epochs to perform.")
     parser.add_argument("--vertices_loss_weight", default=100.0, type=float)
     parser.add_argument("--joints_loss_weight", default=1000.0, type=float)
