@@ -343,9 +343,6 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                             args.vloss_w_sub * vertices_loss(criterion_vertices, pred_vertices_sub, gt_vertices_sub, args.device) + \
                             args.vloss_w_full * vertices_loss(criterion_vertices, pred_vertices, gt_vertices, args.device))
 
-        loss_manager_train.add_scalar("3d_joint_loss", loss_3d_joints.item(), iteration)
-        loss_manager_train.add_scalar("vertex_loss", loss_vertices.item(), iteration)
-        
         # we empirically use hyperparameters to balance difference losses
         loss = args.joints_loss_weight*loss_3d_joints + args.vertices_loss_weight*loss_vertices
         
@@ -361,6 +358,10 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
             score_loss = torch.sum(torch.abs(pred_dict.get('pred_score', torch.zeros(1).cuda())))
             loss_manager_train.add_scalar("score_loss", score_loss.item(), iteration)
             loss += 1e-3*score_loss
+        
+        loss_manager_train.add_scalar("3d_joint_loss", loss_3d_joints.item(), iteration)
+        loss_manager_train.add_scalar("vertex_loss", loss_vertices.item(), iteration)
+        loss_manager_train.add_scalar("total_loss", loss.item(), iteration)
         
         # update logs
         log_loss_3djoints.update(loss_3d_joints.item(), batch_size)
@@ -416,11 +417,14 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                                                 epoch, 
                                                 smpl,
                                                 mesh_sampler,
-                                                loss_manager_eval)
+                                                )
             
             aml_run.log(name='mPVE', value=float(1000*val_mPVE))
             aml_run.log(name='mPJPE', value=float(1000*val_mPJPE))
             aml_run.log(name='PAmPJPE', value=float(1000*val_PAmPJPE))
+            loss_manager_eval.add_scalar("mPVE", float(1000*val_mPVE), epoch)
+            loss_manager_eval.add_scalar("mPJPE", float(1000*val_mPJPE), epoch)
+            loss_manager_eval.add_scalar("PAmPJPE", float(1000*val_PAmPJPE), epoch)
             logger.info(
                 ' '.join(['Validation', 'epoch: {ep}',]).format(ep=epoch) 
                 + '  mPVE: {:6.2f}, mPJPE: {:6.2f}, PAmPJPE: {:6.2f}, Data Count: {:6.2f}'.format(1000*val_mPVE, 1000*val_mPJPE, 1000*val_PAmPJPE, val_count)
@@ -511,7 +515,7 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
         O3DStreamPlot.pause = args.pause_at_start
         yield res
 
-def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss_manager=None):
+def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
     batch_time = AverageMeter()
     mPVE = AverageMeter()
     mPJPE = AverageMeter()
@@ -586,11 +590,6 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler, loss
                 mPJPE.update(np.mean(error_joints))
             if len(error_joints_pa)>0:
                 PAmPJPE.update(np.mean(error_joints_pa))
-
-            if loss_manager is not None:
-                loss_manager.add_scalar("mPVE", np.mean(error_vertices))
-                loss_manager.add_scalar("mPJPE", np.mean(error_joints))
-                loss_manager.add_scalar("PAmPJPE", np.mean(error_joints_pa))
 
             if args.visual and not args.train:
                 attention = pred_dict.get('attention', None)

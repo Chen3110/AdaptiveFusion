@@ -444,7 +444,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
 
     if not args.train:
         snapshot_path = os.path.join(args.output_dir, 'snapshot', args.test_scene)
-        if not os.path.isdir(snapshot_path):
+        if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
         plot = EvaluateStreamPlot(save_path=snapshot_path)
         renderer = Renderer(faces=smpl.faces.cpu().numpy())
