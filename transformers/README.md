@@ -198,7 +198,6 @@ On this machine we thus have a batch size of 32, please increase `gradient_accum
 
 #### Fine-tuning Bert model on the MRPC classification task
 
-This example code fine-tunes the Bert Whole Word Masking model on the Microsoft Research Paraphrase Corpus (MRPC) corpus using distributed training on 8 V100 GPUs to reach a F1 > 92.
 
 ```bash
 python -m torch.distributed.launch --nproc_per_node 8 ./examples/run_glue.py   \

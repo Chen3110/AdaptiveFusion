@@ -1,7 +1,4 @@
 """
-Copyright (c) Microsoft Corporation.
-Licensed under the MIT license.
-
 """
 
 
@@ -19,7 +16,7 @@ def build_dataset(yaml_file, args, is_train=True, scale_factor=1):
         yaml_file = op.join(args.data_dir, yaml_file)
         # code.interact(local=locals())
         assert op.isfile(yaml_file)
-    return MeshTSVYamlDataset(yaml_file, is_train, False, scale_factor)
+    return MeshTSVYamlDataset(args, yaml_file, is_train, False, scale_factor)
 
 
 class IterationBasedBatchSampler(torch.utils.data.sampler.BatchSampler):

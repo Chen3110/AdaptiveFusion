@@ -1,7 +1,4 @@
 """
-Copyright (c) Microsoft Corporation.
-Licensed under the MIT license.
-
 Basic logger. It Computes and stores the average and current value
 """
 

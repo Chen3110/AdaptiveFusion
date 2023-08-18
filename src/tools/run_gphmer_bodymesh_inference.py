@@ -1,7 +1,4 @@
 """
-Copyright (c) Microsoft Corporation.
-Licensed under the MIT license.
-
 End-to-end inference codes for 
 3D human body mesh reconstruction from an image
 """

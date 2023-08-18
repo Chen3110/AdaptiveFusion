@@ -1,9 +1,3 @@
-"""
-Copyright (c) Microsoft Corporation.
-Licensed under the MIT license.
-
-"""
-
 import cv2
 import math
 import json
@@ -76,14 +70,13 @@ class MeshTSVDataset(object):
         return {tsv.get_key(i) : i for i in range(tsv.num_rows())}
 
 
-    def augm_params(self):
+    def augm_params(self, need_augm=False):
         """Get augmentation parameters."""
         flip = 0            # flipping
         pn = np.ones(3)  # per channel pixel-noise
         rot = 0            # rotation
         sc = 1            # scaling
-        # if self.is_train:
-        if False:
+        if need_augm:
             # We flip with probability 1/2
             if np.random.uniform() <= 0.5:
                 flip = 1
@@ -249,7 +242,7 @@ class MeshTSVDataset(object):
             gender = 'none'
 
         # Get augmentation parameters
-        flip,pn,rot,sc = self.augm_params()
+        flip,pn,rot,sc = self.augm_params(self.args.need_augm)
 
         # Process image
         img = self.rgb_processing(img, center, sc*scale, rot, flip, pn)
@@ -340,10 +333,11 @@ class MeshTSVDataset(object):
 class MeshTSVYamlDataset(MeshTSVDataset):
     """ TSVDataset taking a Yaml file for easy function call
     """
-    def __init__(self, yaml_file, is_train=True, cv2_output=False, scale_factor=1):
+    def __init__(self, args, yaml_file, is_train=True, cv2_output=False, scale_factor=1):
         self.cfg = load_from_yaml_file(yaml_file)
         self.is_composite = self.cfg.get('composite', False)
         self.root = op.dirname(yaml_file)
+        self.args = args
         
         if self.is_composite==False:
             img_file = find_file_path_in_yaml(self.cfg['img'], self.root)

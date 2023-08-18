@@ -140,7 +140,6 @@ The code has not been tested with half-precision training with apex on any GLUE 
 MRPC
 ~~~~
 
-This example code fine-tunes BERT on the Microsoft Research Paraphrase
 Corpus (MRPC) corpus and runs in less than 10 minutes on a single K-80 and in 27 seconds (!) on single tesla V100 16GB with apex installed.
 
 Before running this example you should download the

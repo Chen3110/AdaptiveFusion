@@ -325,6 +325,11 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         log_loss_vertices.update(loss_vertices.item(), batch_size)
         log_losses.update(loss.item(), batch_size)
 
+        loss_manager_train.add_scalar('loss_2d_joints', loss_2d_joints.item(), iteration)
+        loss_manager_train.add_scalar('loss_3d_joints', loss_3d_joints.item(), iteration)
+        loss_manager_train.add_scalar('loss_3d_vertices', loss_vertices.item(), iteration)
+        loss_manager_train.add_scalar('loss_all', loss.item(), iteration)
+
         # back prop
         optimizer.zero_grad()
         loss.backward() 
@@ -332,11 +337,6 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
 
         batch_time.update(time.time() - end)
         end = time.time()
-
-        loss_manager_train.add_scalar('loss_all', loss.item(), iteration)
-        loss_manager_train.add_scalar('loss_2d_joints', loss_2d_joints.item(), iteration)
-        loss_manager_train.add_scalar('loss_3d_joints', loss_3d_joints.item(), iteration)
-        loss_manager_train.add_scalar('loss_3d_vertices', loss_vertices.item(), iteration)
 
         if iteration % args.logging_steps == 0 or iteration == max_iter:
             eta_seconds = batch_time.avg * (max_iter - iteration)
@@ -619,7 +619,7 @@ def main(args):
         synchronize()
 
     mkdir(args.output_dir)
-    logger = setup_logger("Graphormer", args.output_dir, get_rank())
+    logger = setup_logger("AMMFusion", args.output_dir, get_rank())
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
     args.inputs = args.inputs.replace(' ','').split(',')
@@ -721,7 +721,7 @@ def main(args):
 
         trans_encoder = torch.nn.Sequential(*trans_encoder)
         total_params = sum(p.numel() for p in trans_encoder.parameters())
-        logger.info('Graphormer encoders total parameters: {}'.format(total_params))
+        logger.info('AMMFusion encoders total parameters: {}'.format(total_params))
         backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
         
@@ -736,7 +736,7 @@ def main(args):
         
         backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
 
-        # build end-to-end Graphormer network (backbone + multi-layer graphormer encoder)
+        # build end-to-end AMMFusion network (backbone + multi-layer AMMFusion encoder)
         Model = getattr(Models, args.model)
         _model = Model(args, backbone, trans_encoder)
 
@@ -796,6 +796,7 @@ def parse_args():
     parser.add_argument('--mask_limbs', action="store_true")
     parser.add_argument('--point_mask_ratio', type=float, default=0.99)
     parser.add_argument('--num_mask_limbs', type=int, default=None)
+    parser.add_argument('--need_augm', action="store_true")
     parser.add_argument('--mix_data', action="store_true")
     parser.add_argument('--eval_test_dataset', action="store_true")
     #########################################################
