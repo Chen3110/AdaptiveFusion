@@ -26,6 +26,7 @@ from src.modeling.hrnet.config import update_config as hrnet_update_config
 from src.datasets.build import make_data_loader
 from src.modeling.pointnet2.pointnet2_modules import PointnetSAModule
 from src.utils.geometric_layers import orthographic_projection
+import src.modeling.data.config as cfg
 
 from src.utils.logger import setup_logger
 from src.utils.comm import synchronize, is_main_process, get_rank, all_gather
@@ -230,7 +231,7 @@ def show_att_weight(args, data_dict, cluster_centers, attention, pred_joints, pr
 def visualize_mesh(renderer, images, gt_keypoints_2d, pred_vertices, pred_camera, pred_keypoints_2d):
     """Tensorboard logging."""
     gt_keypoints_2d = gt_keypoints_2d.cpu().numpy()
-    to_lsp = list(range(1,22))
+    to_lsp = list(range(14))
     rend_imgs = []
     batch_size = pred_vertices.shape[0]
     # Do visualization for the first 6 images of the batch
@@ -248,6 +249,15 @@ def visualize_mesh(renderer, images, gt_keypoints_2d, pred_vertices, pred_camera
         rend_imgs.append(torch.from_numpy(rend_img))   
     rend_imgs = make_grid(rend_imgs, nrow=1)
     return rend_imgs
+
+def visualize_mesh_test(renderer, images, pred_vertices, pred_camera):
+    img = images.cpu().numpy().transpose(1,2,0)
+    # Get predict vertices for the particular example
+    vertices_full = pred_vertices.cpu().numpy() 
+    cam = pred_camera.cpu().numpy()
+    # Visualize only mesh reconstruction 
+    rend_img = visualize_reconstruction_no_text(img, 224, vertices_full, cam, renderer, color='light_blue')
+    return rend_img
 
 def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_sampler, start_epoch):
     smpl.eval()
@@ -527,7 +537,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
 
     if not args.train:
         snapshot_path = os.path.join(args.output_dir, 'snapshot', args.test_scene)
-        if not os.path.isdir(snapshot_path):
+        if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
         plot = EvaluateStreamPlot(save_path=snapshot_path)
         renderer = Renderer(faces=smpl.faces.cpu().numpy())
@@ -535,6 +545,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
     fusion_model.eval()
     smpl.eval()
     batch = 0
+    pelvis = 14 if args.dataset == 'Human36MDataset' else 0
     with torch.no_grad():
         for i, data_dict in enumerate(val_loader):
             # compute output
@@ -559,6 +570,10 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
             pred_dict, pred_3d_joints, pred_verts_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
 
             pred_3d_pelvis = pred_3d_joints[:,0,:]
+            if args.dataset == 'Human36MDataset':
+                gt_3d_joints = gt_3d_joints[:,cfg.J24_TO_J14,:]
+                pred_3d_pelvis = smpl.get_h36m_joints(pred_vertices)[:,cfg.H36M_J17_NAME.index('Pelvis'),:]
+
             pred_vertices = pred_vertices - pred_3d_pelvis[:, None, :]
             pred_3d_joints = pred_3d_joints - pred_3d_pelvis[:, None, :]
             # measure errors
@@ -571,15 +586,18 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
             per_pampjpe.append(error_joints_pa)
 
             if not args.train and args.joints_2d_loss and i%100==0:
+                # visual_imgs = visualize_mesh_test(renderer,
+                #                             data_dict['orig_img'][args.joints_2d_loss][0].detach(),
+                #                             pred_vertices[0].detach(), 
+                #                             pred_dict['camera'][0].detach(),)
                 pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
-                visual_imgs_output = visual_imgs = visualize_mesh(renderer,
-                                            data_dict['orig_img'][args.joints_2d_loss].detach(),
-                                            data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
-                                            pred_vertices.detach(), 
-                                            pred_dict['camera'].detach(),
-                                            pred_2d_joints.detach())
+                visual_imgs_output = visualize_mesh(renderer,
+                                                    data_dict['orig_img'][args.joints_2d_loss].detach(),
+                                                    data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
+                                                    pred_vertices.detach(), 
+                                                    pred_dict['camera'].detach(),
+                                                    pred_2d_joints.detach())
                 visual_imgs = visual_imgs_output.permute(1,2,0).numpy()
-                        
                 temp_fname = os.path.join(args.output_dir, 'snapshot', 'pred_{}.jpg'.format(i))
                 print('save to ', temp_fname)
                 cv2.imwrite(temp_fname, np.asarray(visual_imgs[:,:,::-1]*255))

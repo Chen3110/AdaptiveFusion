@@ -226,7 +226,7 @@ def copy2cpu(tensor):
 def project_pcl(pcl, trans_mat=None, intrinsic=None, image_size=[1536,2048], return_int=True):
     if trans_mat is not None:
         pcl = (pcl - trans_mat['t']) @ np.array(trans_mat['R']).reshape(3, 3)
-        intrinsic = trans_mat['K']
+        intrinsic = trans_mat.get('K', None)
     intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['image0']
     pcl_2d = ((pcl/pcl[:,2:3]) @ intrinsic.T)
     if return_int:
@@ -314,7 +314,8 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
     # transform the joints to camera coordinate
     if trans_mat is not None:
         joints = (joints - trans_mat['t']) @ trans_mat['R']
-    intrinsic = intrinsic if intrinsic is not None else trans_mat['K']
+        intrinsic = trans_mat.get('K', None)
+    intrinsic = np.array(intrinsic) if intrinsic is not None else INTRINSIC['image0']
     joint_max = joints.max(axis=0) + margin
     joint_min = joints.min(axis=0) - margin
     # get 3d bounding box from joints
@@ -360,14 +361,15 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
 def trans_mat_2_tensor(trans_mat):
     trans_mat_array = np.hstack((trans_mat['R'], np.array([trans_mat['t']]).T))
     trans_mat_array = np.vstack((trans_mat_array, [0,0,0,1]))
-    return trans_mat_array
+    return torch.tensor(trans_mat_array)
 
 def trans_mat_2_dict(trans_mat):
-    trans_mat = copy2cpu(trans_mat)
-    trans_mat_dict = {
-        'R': trans_mat[:3, :3],
-        't': trans_mat[:3, 3]
-    }
+    if isinstance(trans_mat, torch.Tensor):
+        trans_mat = copy2cpu(trans_mat)
+        trans_mat_dict = {
+            'R': trans_mat[:3, :3],
+            't': trans_mat[:3, 3]
+        }
     return trans_mat_dict
 
 def get_rgb_value(pcl, image, visual=False, ret_image=False):

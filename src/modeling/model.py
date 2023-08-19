@@ -493,10 +493,10 @@ class TokenFusion(torch.nn.Module):
                     point_feat, xyz = self.process_point(data_dict[input], pos_emb=int(input[-1]), input=input)
                     point_feats.append(point_feat)
                     mas_patch_idx = self.get_img_patch_idx(xyz+data_dict['root_pelvis'][:,None,:].cuda(), 
-                                                           data_dict['trans_mat']['image0'].cuda(), 
+                                                           trans_mat_2_tensor(data_dict['trans_mat']['image0']).float().cuda(), 
                                                            'image0', data_dict['bbox']['image0'].cuda())
                     sub_patch_idx = self.get_img_patch_idx(xyz+data_dict['root_pelvis'][:,None,:].cuda(), 
-                                                           data_dict['trans_mat']['image1'].cuda(), 
+                                                           trans_mat_2_tensor(data_dict['trans_mat']['image1']).float().cuda(), 
                                                            'image1', data_dict['bbox']['image1'].cuda())
                     proj_patch_idx.append([mas_patch_idx, sub_patch_idx])
         

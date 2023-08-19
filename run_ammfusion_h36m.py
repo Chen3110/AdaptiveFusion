@@ -156,6 +156,15 @@ def visualize_mesh(renderer, images, gt_keypoints_2d, pred_vertices, pred_camera
     rend_imgs = make_grid(rend_imgs, nrow=1)
     return rend_imgs
 
+def visualize_mesh_test(renderer, images, pred_vertices, pred_camera):
+    img = images.cpu().numpy().transpose(1,2,0)
+    # Get predict vertices for the particular example
+    vertices_full = pred_vertices.cpu().numpy() 
+    cam = pred_camera.cpu().numpy()
+    # Visualize only mesh reconstruction 
+    rend_img = visualize_reconstruction_no_text(img, 224, vertices_full, cam, renderer, color='light_blue')
+    return rend_img
+
 def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attention=None, 
                      cluster_centers=None, pred_verts_sub2=None, pred_joints=None, gt_pelvis=None):
     for k, v in data_dict.items():
@@ -509,15 +518,10 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
                 PAmPJPE.update(np.mean(error_joints_pa), int(torch.sum(has_3d_joints)))
                 
             if not args.train and i%100==0 and is_main_process():
-                pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
-                visual_imgs_output = visualize_mesh(renderer,
-                                            data_dict['orig_img'].detach(),
-                                            data_dict['joints_2d'][:,:,:2].detach(),
-                                            pred_vertices.detach(), 
-                                            pred_dict['camera'].detach(),
-                                            pred_2d_joints.detach(),
-                                            )
-                visual_imgs = visual_imgs_output.permute(1,2,0).numpy()
+                visual_imgs = visualize_mesh_test(renderer,
+                                            data_dict['orig_img'][args.joints_2d_loss][0].detach(),
+                                            pred_vertices[0].detach(), 
+                                            pred_dict['camera'][0].detach(),)
                         
                 temp_fname = os.path.join(args.output_dir, 'snapshot', 'pred_{}.jpg'.format(i))
                 print('save to ', temp_fname)
