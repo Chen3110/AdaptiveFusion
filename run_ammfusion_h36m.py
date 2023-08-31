@@ -876,7 +876,7 @@ def parse_args():
     parser.add_argument('--save_snapshot', action="store_true")
     parser.add_argument('--output_dim', type=int, default=3)
     parser.add_argument('--points_w_image_feat', action="store_true")
-    parser.add_argument('--full_modalities', action="store_true")
+    parser.add_argument('--fix_modalities', action="store_true")
     parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--wo_MMM', action="store_true")
     parser.add_argument('--wo_local_feat', action="store_true")

@@ -110,7 +110,7 @@ class AdaptiveFusion(torch.nn.Module):
 
         if is_train:
             inputs = args.inputs.copy()
-            if args.full_modalities:
+            if args.fix_modalities:
                 input_elim_indices = []
             else:
                 input_elim_indices = gen_random_indices(num_indices=len(inputs))
@@ -287,7 +287,7 @@ class DeepFusion(torch.nn.Module):
         if is_train:
             inputs = args.inputs.copy()
             # eliminate random modalities
-            if args.full_modalities:
+            if args.fix_modalities:
                 input_elim_indices = []
             else:
                 input_elim_indices = gen_random_indices(num_indices=len(inputs))
@@ -447,7 +447,7 @@ class TokenFusion(torch.nn.Module):
         if is_train:
             inputs = args.inputs.copy()
             # eliminate random modalities
-            if args.full_modalities:
+            if args.fix_modalities:
                 input_elim_indices = []
             else:
                 input_elim_indices = gen_random_indices(num_indices=len(inputs))
@@ -700,7 +700,7 @@ class PointWImageFeat(AdaptiveFusion):
 
         if is_train:
             inputs = args.inputs.copy()
-            if args.full_modalities:
+            if args.fix_modalities:
                 input_elim_indices = []
             else:
                 input_elim_indices = gen_random_indices(num_indices=len(inputs))
