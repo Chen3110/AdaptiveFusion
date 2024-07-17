@@ -28,6 +28,9 @@ class mmBodySequenceLoader(object):
         # load transformation matrix
         with open(os.path.join(seq_path, 'calib.txt')) as f:
             calib = eval(f.readline())
+        for k, v in calib.items():
+            calib[k]['R'] = np.array(v['R'])
+            calib[k]['t'] = np.array(v['t'])
         self.calib = {
             'image0':calib['kinect_master'],
             'image1':calib['kinect_sub'],
@@ -113,6 +116,10 @@ class BEHAVESequenceLoader(object):
         # load transformation matrix
         with open(os.path.join(seq_path, 'cameras.json'), 'r', encoding='utf8') as f:
             calib = json.load(f)
+        for k, v in calib.items():
+            calib[k]['R'] = np.array(v['R'])
+            calib[k]['t'] = np.array(v['t'])
+            calib[k]['K'] = np.array(v['K'])
         self.calib = {}
         for i in range(4):
             if 'image{}'.format(i) in self.resource:
@@ -360,7 +367,7 @@ def crop_image(joints:np.ndarray, image:np.ndarray, trans_mat:dict=None, visual:
 
 def trans_mat_2_tensor(trans_mat):
     trans_mat_array = np.hstack((trans_mat['R'], np.array([trans_mat['t']]).T))
-    trans_mat_array = np.vstack((trans_mat_array, [0,0,0,1]))
+    trans_mat_array = np.vstack((trans_mat_array, np.array([0,0,0,1])))
     return torch.tensor(trans_mat_array)
 
 def trans_mat_2_dict(trans_mat):
@@ -400,6 +407,20 @@ def convert_square_image(image):
         background[loc: loc + short_side] = image[...]
         image = background.transpose((1, 0, 2)).copy() if img_w < img_h else background
     return image
+
+def rotation6d_2_rot_mat(rotation6d):
+    batch_size = rotation6d.shape[0]
+    pose6d = rotation6d.reshape(-1, 6)
+    tmp_x = torch.nn.functional.normalize(pose6d[:,:3], dim = -1)
+    tmp_z = torch.nn.functional.normalize(torch.cross(tmp_x, pose6d[:,3:], dim = -1), dim = -1)
+    tmp_y = torch.cross(tmp_z, tmp_x, dim = -1)
+
+    tmp_x = tmp_x.view(-1, 3, 1)
+    tmp_y = tmp_y.view(-1, 3, 1)
+    tmp_z = tmp_z.view(-1, 3, 1)
+    R = torch.cat((tmp_x, tmp_y, tmp_z), -1)
+
+    return R.reshape(batch_size, -1)
 
 def rodrigues_2_rot_mat(rvecs):
     batch_size = rvecs.shape[0]

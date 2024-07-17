@@ -24,7 +24,7 @@ from src.datasets.utils import rodrigues_2_rot_mat
 
 SMPL_MODEL_NEUTRAL_PATH = 'src/modeling/data/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl'
 
-SMPLX_MODEL_NEUTRAL_PATH = 'src/modeling/data/SMPLX_NEUTRAL.pkl'
+SMPLX_MODEL_NEUTRAL_PATH = 'models/smplx/SMPLX_NEUTRAL.pkl'
 
 class SMPL(nn.Module):
     def __init__(self, model_file=SMPL_MODEL_NEUTRAL_PATH):
@@ -287,8 +287,8 @@ class Mesh(object):
         return x
 
 class SMPLX(BodyModel):
-    def __init__(self, num_betas=16, **kwargs):
-        super().__init__(bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=num_betas, num_expressions=0, **kwargs)
+    def __init__(self, bm_fname=SMPLX_MODEL_NEUTRAL_PATH, num_betas=16, **kwargs):
+        super().__init__(bm_fname=bm_fname, num_betas=num_betas, num_expressions=0, **kwargs)
         self.faces = self.f
 
     def forward(self, pose_body, betas, use_rodrigues=True):

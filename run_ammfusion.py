@@ -18,6 +18,7 @@ from src.datasets.utils import copy2cpu, crop_image, project_pcl, trans_mat_2_di
 from torch.utils.tensorboard import SummaryWriter
 
 from src.modeling.bert import BertConfig, Graphormer
+from src.modeling.hrnet.resnet import ResNet50, CLIPResNetWithAttention
 import src.modeling.model as Models
 from src.modeling._smpl import SMPL, SMPLX, SMPLH36M, Mesh, SMPLXMesh
 from src.modeling.hrnet.hrnet_cls_net_gridfeat import get_cls_net_gridfeat
@@ -25,6 +26,7 @@ from src.modeling.hrnet.config import config as hrnet_config
 from src.modeling.hrnet.config import update_config as hrnet_update_config
 from src.datasets.build import make_data_loader
 from src.modeling.pointnet2.pointnet2_modules import PointnetSAModule
+from src.modeling.pointnet2.pointnext import PointNeXt
 from src.utils.geometric_layers import orthographic_projection
 import src.modeling.data.config as cfg
 
@@ -34,7 +36,7 @@ from src.utils.miscellaneous import mkdir, set_seed
 from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.metric_pampjpe import reconstruction_error
 import src.datasets.fusion_dataset as Datasets
-from src.utils.loss import LossManager
+from src.utils.loss_manager import LossManager
 from src.utils.renderer import Renderer, visualize_reconstruction, visualize_reconstruction_no_text
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
@@ -336,7 +338,8 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         gt_vertices -= gt_3d_pelvis
         
         for m in args.inputs:
-            data_dict[m] = data_dict[m].to(args.device)
+            if m in data_dict.keys():
+                data_dict[m] = data_dict[m].to(args.device)
 
         # prepare masks for mask vertex/joint modeling
         joint_mask_ = joint_mask.expand(-1,-1,2051)
@@ -357,7 +360,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
         loss = args.joints_loss_weight*loss_3d_joints + args.vertices_loss_weight*loss_vertices
         
         if args.joints_2d_loss:
-            gt_2d_joints = data_dict['joints_2d'][args.joints_2d_loss].float().to(args.device)
+            gt_2d_joints = data_dict['joints_2d'].float().to(args.device)
             pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
             loss_2d_joints = keypoint_2d_loss(criterion_2d_keypoints, pred_2d_joints, gt_2d_joints)
             log_loss_2djoints.update(loss_2d_joints.item(), batch_size)
@@ -406,8 +409,8 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
             if args.joints_2d_loss:
                 aml_run.log(name='2d joint Loss', value=float(log_loss_2djoints.avg))
                 visual_imgs = visualize_mesh(renderer,
-                                            data_dict['orig_img'][args.joints_2d_loss].detach(),
-                                            data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
+                                            data_dict['orig_img'].detach(),
+                                            data_dict['joints_2d'][:,:,:2].detach(),
                                             pred_vertices.detach(), 
                                             pred_dict['camera'].detach(),
                                             pred_2d_joints.detach())
@@ -422,7 +425,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                     aml_run.log_image(name='visual results', path=temp_fname)
                 
         if iteration % iters_per_epoch == 0:
-            val_mPVE, val_mPJPE, val_PAmPJPE, val_count = run_validate(args, val_dataloader, 
+            val_mPVE, val_mPJPE, val_PAmPJPE, val_PAmPVE, val_count = run_validate(args, val_dataloader, 
                                                 fusiuon_model, 
                                                 epoch, 
                                                 smpl,
@@ -432,28 +435,30 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
             aml_run.log(name='mPVE', value=float(1000*val_mPVE))
             aml_run.log(name='mPJPE', value=float(1000*val_mPJPE))
             aml_run.log(name='PAmPJPE', value=float(1000*val_PAmPJPE))
+            aml_run.log(name='PAmPVE', value=float(1000*val_PAmPVE))
             loss_manager_eval.add_scalar("mPVE", float(1000*val_mPVE), epoch)
             loss_manager_eval.add_scalar("mPJPE", float(1000*val_mPJPE), epoch)
             loss_manager_eval.add_scalar("PAmPJPE", float(1000*val_PAmPJPE), epoch)
+            loss_manager_eval.add_scalar("PAmPVE", float(1000*val_PAmPVE), epoch)
             logger.info(
                 ' '.join(['Validation', 'epoch: {ep}',]).format(ep=epoch) 
-                + '  mPVE: {:6.2f}, mPJPE: {:6.2f}, PAmPJPE: {:6.2f}, Data Count: {:6.2f}'.format(1000*val_mPVE, 1000*val_mPJPE, 1000*val_PAmPJPE, val_count)
+                + '  mPJPE: {:6.2f}, mPVE: {:6.2f}, PAmPJPE: {:6.2f}, PAmPVE: {:6.2f}, Data Count: {:6.2f}'.format(1000*val_mPJPE, 1000*val_mPVE, 1000*val_PAmPJPE, 1000*val_PAmPVE, val_count)
             )
 
-            if val_PAmPJPE<log_eval_metrics.PAmPJPE or epoch%10==0:
+            save_checkpoint(fusiuon_model, args, 0, 0)
+            if val_PAmPJPE < log_eval_metrics.PAmPJPE:
                 save_checkpoint(fusiuon_model, args, epoch, iteration)
-                log_eval_metrics.update(val_mPVE, val_mPJPE, val_PAmPJPE, epoch)
+                log_eval_metrics.update(val_mPVE, val_mPJPE, val_PAmPJPE, val_PAmPVE, epoch)
         
     total_training_time = time.time() - start_training_time
     total_time_str = str(datetime.timedelta(seconds=total_training_time))
     logger.info('Total training time: {} ({:.4f} s / iter)'.format(
         total_time_str, total_training_time / max_iter)
     )
-    save_checkpoint(fusiuon_model, args, epoch, iteration)
 
     logger.info(
         ' Best Results:'
-        + '  mPVE: {:6.2f}, mPJPE: {:6.2f}, PAmPJPE: {:6.2f}, at epoch {:6.2f}'.format(1000*log_eval_metrics.mPVE, 1000*log_eval_metrics.mPJPE, 1000*log_eval_metrics.PAmPJPE, log_eval_metrics.epoch)
+        + '  mPJPE: {:6.2f}, mPVE: {:6.2f}, PAmPJPE: {:6.2f}, PAmPVE: {:6.2f}, at epoch {:6.2f}'.format(1000*log_eval_metrics.mPJPE, 1000*log_eval_metrics.mPVE, 1000*log_eval_metrics.PAmPJPE, 1000*log_eval_metrics.PAmPVE, log_eval_metrics.epoch)
     )
 
 
@@ -468,15 +473,16 @@ def run_eval_general(args, val_dataloader, fusion_model, smpl, mesh_sampler):
         )
     fusion_model.eval()
 
-    val_mPVE, val_mPJPE, val_PAmPJPE, val_count = run_validate(args, val_dataloader, fusion_model, epoch, smpl, mesh_sampler)
+    val_mPVE, val_mPJPE, val_PAmPJPE, val_PAmPVE, val_count = run_validate(args, val_dataloader, fusion_model, epoch, smpl, mesh_sampler)
 
     aml_run.log(name='mPVE', value=float(1000*val_mPVE))
     aml_run.log(name='mPJPE', value=float(1000*val_mPJPE))
     aml_run.log(name='PAmPJPE', value=float(1000*val_PAmPJPE))
+    aml_run.log(name='PAmPVE', value=float(1000*val_PAmPVE))
 
     logger.info(
         ' '.join(['Validation', 'epoch: {ep}',]).format(ep=epoch) 
-        + '  mPVE: {:6.2f}, mPJPE: {:6.2f}, PAmPJPE: {:6.2f} '.format(1000*val_mPVE, 1000*val_mPJPE, 1000*val_PAmPJPE)
+        + '  mPJPE: {:6.2f}, mPVE: {:6.2f}, PAmPJPE: {:6.2f}, PAmPVE: {:6.2f}'.format(1000*val_mPJPE, 1000*val_mPVE, 1000*val_PAmPJPE, 1000*val_PAmPVE)
     )
     return
 
@@ -526,14 +532,15 @@ def result_generator(args, data_dict, pred_vertices, gt_vertices, face, attentio
         yield res
 
 def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
-    batch_time = AverageMeter()
     mPVE = AverageMeter()
     mPJPE = AverageMeter()
     PAmPJPE = AverageMeter()
+    PAmPVE = AverageMeter()
 
     per_joint_err = []
     per_vertex_err = []
     per_pampjpe = []
+    per_pampve = []
 
     if not args.train:
         snapshot_path = os.path.join(args.output_dir, 'snapshot', args.test_scene)
@@ -578,22 +585,20 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
             pred_3d_joints = pred_3d_joints - pred_3d_pelvis[:, None, :]
             # measure errors
             error_vertices = mean_per_vertex_error(pred_vertices, gt_vertices)
+            error_vertices_pa = reconstruction_error(pred_vertices.cpu().numpy(), gt_vertices.cpu().numpy(), reduction=None)
             error_joints = mean_per_joint_position_error(pred_3d_joints, gt_3d_joints[:,:,:3])
             error_joints_pa = reconstruction_error(pred_3d_joints.cpu().numpy(), gt_3d_joints[:,:,:3].cpu().numpy(), reduction=None)
 
             per_joint_err.append(torch.norm((pred_3d_joints - gt_3d_joints[:,:,:3]), dim=-1))
             per_vertex_err.append(torch.norm((pred_vertices - gt_vertices[:,:,:3]), dim=-1))
             per_pampjpe.append(error_joints_pa)
+            per_pampve.append(error_joints_pa)
 
             if not args.train and args.joints_2d_loss and i%100==0:
-                # visual_imgs = visualize_mesh_test(renderer,
-                #                             data_dict['orig_img'][args.joints_2d_loss][0].detach(),
-                #                             pred_vertices[0].detach(), 
-                #                             pred_dict['camera'][0].detach(),)
                 pred_2d_joints = orthographic_projection(pred_3d_joints, pred_dict['camera'])
                 visual_imgs_output = visualize_mesh(renderer,
-                                                    data_dict['orig_img'][args.joints_2d_loss].detach(),
-                                                    data_dict['joints_2d'][args.joints_2d_loss][:,:,:2].detach(),
+                                                    data_dict['orig_img'].detach(),
+                                                    data_dict['joints_2d'][:,:,:2].detach(),
                                                     pred_vertices.detach(), 
                                                     pred_dict['camera'].detach(),
                                                     pred_2d_joints.detach())
@@ -608,6 +613,8 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
                 mPJPE.update(np.mean(error_joints))
             if len(error_joints_pa)>0:
                 PAmPJPE.update(np.mean(error_joints_pa))
+            if len(error_vertices_pa)>0:
+                PAmPVE.update(np.mean(error_vertices_pa))
 
             if args.visual and not args.train:
                 attention = pred_dict.get('attention', None)
@@ -617,11 +624,10 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
                 batch += 1
                 if batch > args.max_num_batch:
                     return 0, 0, 0, 0
+                print('batch_id:', i)
                 if args.save_snapshot:
-                    print('batch_id:', i)
                     plot.show(gen, save_path=snapshot_path)
                 else:
-                    print('batch_id:', i)
                     plot.show(gen)
 
     val_mPVE = all_gather(float(mPVE.avg))
@@ -631,6 +637,8 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
 
     val_PAmPJPE = all_gather(float(PAmPJPE.avg))
     val_PAmPJPE = sum(val_PAmPJPE)/len(val_PAmPJPE)
+    val_PAmPVE = all_gather(float(PAmPVE.avg))
+    val_PAmPVE = sum(val_PAmPVE)/len(val_PAmPVE)
 
     val_count = all_gather(float(mPVE.count))
     val_count = sum(val_count)
@@ -643,18 +651,20 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
         j_err = copy2cpu(torch.vstack(per_joint_err))
         v_err = copy2cpu(torch.vstack(per_vertex_err))
         pa_err = np.hstack(per_pampjpe)
+        pampve = np.hstack(per_pampve)
         np.save(os.path.join(output_path, "per_joint_err"), j_err)
         np.save(os.path.join(output_path, "per_vertex_err"), v_err)
-        print("mean joint err (cm):", np.mean(j_err)*100)
-        print("mean vertex err (cm):", np.mean(v_err)*100)
-        print("max joint err (cm):", np.mean(np.max(j_err, axis=1), axis=0)*100)
-        print("max vertex err (cm):", np.mean(np.max(v_err, axis=1), axis=0)*100)
+        logger.info("mean joint err (cm): {}".format(np.mean(j_err)*100))
+        logger.info("mean vertex err (cm): {}".format(np.mean(v_err)*100))
+        logger.info("max joint err (cm): {}".format(np.mean(np.max(j_err, axis=1), axis=0)*100))
+        logger.info("max vertex err (cm): {}".format(np.mean(np.max(v_err, axis=1), axis=0)*100))
         with open(os.path.join(output_path, "error.txt"), 'w') as f:
             f.write("mean joint error: " + str(np.mean(j_err)*100))
             f.write("\nmean vertex error: " + str(np.mean(v_err)*100))
             f.write("\nmax joint error: " + str(np.mean(np.max(j_err, axis=1), axis=0)*100))
             f.write("\nmax vertex error: " + str(np.mean(np.max(v_err, axis=1), axis=0)*100))
             f.write("\npampjpe: " + str(np.mean(pa_err)*100))
+            f.write("\npampjpe: " + str(np.mean(pampve)*100))
 
         # write errors to the excel
         sheet_loc_dict = {
@@ -681,7 +691,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
         work_sheet[sheet_locs[3]] = str(np.mean(np.max(v_err, axis=1), axis=0)*100)
         work_book.save(excel_path)
 
-    return val_mPVE, val_mPJPE, val_PAmPJPE, val_count
+    return val_mPVE, val_mPJPE, val_PAmPJPE, val_PAmPVE, val_count
 
 
 def main(args):
@@ -705,7 +715,9 @@ def main(args):
         synchronize()
 
     mkdir(args.output_dir)
-    logger = setup_logger("AMMFusion", args.output_dir, get_rank())
+    logger = setup_logger("AdaptiveFusion", args.output_dir, get_rank())
+    logger.info("Start training" if args.train else "Start testing")
+    logger.info("Output dir: {}".format(args.output_dir))
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
     args.inputs = args.inputs.replace(' ','').split(',')
@@ -797,42 +809,47 @@ def main(args):
 
         
         # init ImageNet pre-trained backbone model
-        if args.arch=='hrnet':
+        if args.img_backbone=='hrnet':
             hrnet_yaml = 'models/hrnet/cls_hrnet_w40_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w40_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
             img_backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w40 model')
-        elif args.arch=='hrnet-w64':
+        elif args.img_backbone=='hrnet-w64':
             hrnet_yaml = 'models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w64_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
             img_backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w64 model')
+        elif args.img_backbone=='clipresnet':
+            print("=> using pre-trained model '{}'".format(args.img_backbone))
+            img_backbone = CLIPResNetWithAttention()
         else:
-            print("=> using pre-trained model '{}'".format(args.arch))
-            img_backbone = models.__dict__[args.arch](pretrained=True)
-            # remove the last fc layer
-            img_backbone = torch.nn.Sequential(*list(img_backbone.children())[:-2])
+            print("=> using pre-trained model '{}'".format(args.img_backbone))
+            img_backbone = ResNet50()
 
         trans_encoder = torch.nn.Sequential(*trans_encoder)
         total_params = sum(p.numel() for p in trans_encoder.parameters())
-        logger.info('AMMFusion encoders total parameters: {}'.format(total_params))
+        logger.info('AdaptiveFusion encoders total parameters: {}'.format(total_params))
         backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
         
-        if args.model == 'PointWImageFeat':
-            mlps = [2048,4096,4096,2048]
-        elif args.use_point_feat:
-            mlps = [3,128,128,1024,1024,2048]
-        else:
-            mlps = [0,128,128,1024,1024,2048]
-        radar_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=32, mlp=mlps.copy())
-        depth_backbone = PointnetSAModule(npoint=49, radius=0.4, nsample=64, mlp=mlps.copy())
-        
+        if args.pcd_backbone=='pointnet':
+            if args.model == 'PointWImageFeat':
+                mlps = [2048,4096,4096,2048]
+            elif args.use_point_feat:
+                mlps = [3,128,128,1024,1024,2048]
+            else:
+                mlps = [0,128,128,1024,1024,2048]
+            radar_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=32, mlp=mlps.copy())
+            depth_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=64, mlp=mlps.copy())
+        elif args.pcd_backbone=='pointnext':
+            radar_backbone = PointNeXt()
+            depth_backbone = PointNeXt()
+
         backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
 
-        # build end-to-end AMMfusion network (backbone + multi-layer Fusion Transformer)
+        # build end-to-end AdaptiveFusion network (backbone + multi-layer Fusion Transformer)
         Model = getattr(Models, args.model)
         _model = Model(args, backbone, trans_encoder)
 
@@ -886,7 +903,7 @@ def parse_args():
     #########################################################
     parser.add_argument("--data_path", default='/home/nesc525/drivers/6/mmBody', type=str, required=False,
                         help="Directory with all datasets, each in one subfolder")
-    parser.add_argument("--num_workers", default=4, type=int, 
+    parser.add_argument("--num_workers", default=10, type=int, 
                         help="Workers in dataloader.")
     parser.add_argument("--img_scale_factor", default=1, type=int, 
                         help="adjust image resolution.") 
@@ -908,6 +925,8 @@ def parse_args():
     parser.add_argument('--need_augm', action="store_true")
     parser.add_argument('--mix_data', action="store_true")
     parser.add_argument('--eval_test_dataset', action="store_true")
+    parser.add_argument('--image_size', type=int, default=224)
+    parser.add_argument('--need_crop', action="store_true")
     #########################################################
     # Loading/saving checkpoints
     #########################################################
@@ -941,8 +960,10 @@ def parse_args():
     #########################################################
     # Model architectures
     #########################################################
-    parser.add_argument('-a', '--arch', default='hrnet-w64',
+    parser.add_argument('--img_backbone', default='hrnet-w64',
                     help='CNN backbone architecture: hrnet-w64, hrnet, resnet50')
+    parser.add_argument('--pcd_backbone', default='pointnet',
+                    help='Point backbone architecture: pointnet, pointnext')
     parser.add_argument("--model", default='AdaptiveFusion', type=str,
                         help='Choose the model')
     parser.add_argument("--num_hidden_layers", default=4, type=int, required=False, 
@@ -984,6 +1005,7 @@ def parse_args():
     parser.add_argument('--fix_modalities', action="store_true")
     parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--wo_MMM', action="store_true")
+    parser.add_argument('--feat_mask', action="store_true")
     parser.add_argument('--wo_local_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)

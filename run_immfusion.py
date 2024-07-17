@@ -37,7 +37,7 @@ from src.utils.renderer import Renderer, visualize_reconstruction, visualize_rec
 from src.utils.metric_pampjpe import reconstruction_error
 from src.utils.geometric_layers import orthographic_projection
 import src.datasets.human_mesh_tsv as Datasets
-from src.utils.loss import LossManager
+from src.utils.loss_manager import LossManager
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
 from src.utils.dingtalk import TimerBot
@@ -343,7 +343,7 @@ def run(args, train_dataloader, val_dataloader, Graphormer_model, smpl, mesh_sam
                 + '  mPVE: {:6.2f}, mPJPE: {:6.2f}, PAmPJPE: {:6.2f}, Data Count: {:6.2f}'.format(1000*val_mPVE, 1000*val_mPJPE, 1000*val_PAmPJPE, val_count)
             )
 
-            if val_PAmPJPE<log_eval_metrics.PAmPJPE or epoch%10==0:
+            if val_PAmPJPE < log_eval_metrics.PAmPJPE:
                 save_checkpoint(Graphormer_model, args, epoch, iteration)
                 log_eval_metrics.update(val_mPVE, val_mPJPE, val_PAmPJPE, epoch)
         
@@ -820,21 +820,21 @@ def main(args):
 
         
         # init ImageNet pre-trained backbone model
-        if args.arch=='hrnet':
+        if args.img_backbone=='hrnet':
             hrnet_yaml = 'models/hrnet/cls_hrnet_w40_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w40_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
             backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w40 model')
-        elif args.arch=='hrnet-w64':
+        elif args.img_backbone=='hrnet-w64':
             hrnet_yaml = 'models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w64_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
             backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w64 model')
         else:
-            print("=> using pre-trained model '{}'".format(args.arch))
-            backbone = models.__dict__[args.arch](pretrained=True)
+            print("=> using pre-trained model '{}'".format(args.img_backbone))
+            backbone = models.__dict__[args.img_backbone](pretrained=True)
             # remove the last fc layer
             backbone = torch.nn.Sequential(*list(backbone.children())[:-2])
 

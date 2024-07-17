@@ -13,19 +13,22 @@ class mmBodyDataset():
     def __init__(self, args):
         self.normalize_img = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.args = args
-        self.img_res = 224
+        self.img_res = args.image_size
         self.data_path = op.join(args.data_path, 'train') if args.train else op.join(args.data_path, 'test')
         self.seq_idxes = eval(args.seq_idxes) if args.seq_idxes else range(20)
         self.inputs = args.inputs
+        self.need_crop = args.need_crop
         self.init_index_map()
             
     def init_index_map(self):
         self.index_map = [0,]
         if self.args.train:
             seq_dirs = ['sequence_{}'.format(i) for i in self.seq_idxes]
+            # seq_dirs = ['sequence_0']
             self.seq_paths = [op.join(self.data_path, p) for p in seq_dirs]
         else:
             seq_dirs = ['sequence_{}'.format(i) for i in range(2)]
+            # seq_dirs = ['sequence_0']
             self.seq_paths = [op.join(self.data_path, self.args.test_scene, p) for p in seq_dirs]
         
         print('Data path: ', self.seq_paths)
@@ -49,14 +52,14 @@ class mmBodyDataset():
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             # crop person area using joints
             image, box_min, box_max = crop_image(joints_3d, image, trans_mat, square=True, return_box=True)
-            image = cv2.resize(image, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
+        image = cv2.resize(image, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
         image = np.transpose(image.astype('float32'), (2,0,1))/255.0
         image = torch.from_numpy(image).float()
         if need_normal:
             image = self.normalize_img(image)
         if need_crop:
             return image, box_min, box_max
-        return image
+        return image, None, None
     
     def process_pcl(self, pcl, joints, padding_points=1024, mask_limbs=False, need_filter=False, 
                     pelvis_idx=0, mask_ratio=0.99, num_mask_limbs=None):
@@ -101,6 +104,8 @@ class mmBodyDataset():
         frame = seq_loader[frame_idx]
         # get mesh parameters
         mesh = dict(frame['mesh'])
+        pose = mesh['pose']
+        betas = mesh['shape']
         joints_3d = mesh['joints'][:22]
         verts = mesh['vertices']
         result = {}
@@ -117,20 +122,21 @@ class mmBodyDataset():
         joints_2d = {}
         for image in self.args.input_dict['image']:
             orig_imgs[image] = frame[image].copy()
-            result[image] = self.process_image(frame[image], joints_3d, seq_loader.calib[image])
-            trans_mat[image] = seq_loader.calib[image]
-            bbox[image] = frame['bbox{}'.format(image[-1])].reshape(-1)
-            resize_ratio = [self.img_res, self.img_res] / (bbox[image][2:] - bbox[image][:2])
-            if self.args.joints_2d_loss:
-                joints_2d[image] = ((project_pcl(joints_3d, trans_mat=seq_loader.calib[image], intrinsic=INTRINSIC[image]) 
-                                     - bbox[image][0:2]) * resize_ratio).astype(np.int64)
+            result[image] = self.process_image(frame[image], joints_3d, seq_loader.calib[image], need_crop=self.need_crop)[0]
+            trans_mat[image] = trans_mat_2_tensor(seq_loader.calib[image]).float()
+            bbox_np = frame['bbox{}'.format(image[-1])].reshape(-1)
+            bbox[image] = torch.from_numpy(bbox_np)
+            if self.args.joints_2d_loss == image:
+                resize_ratio = [self.img_res, self.img_res] / (bbox_np[2:] - bbox_np[:2])
+                joints_2d = torch.from_numpy((project_pcl(joints_3d, trans_mat=seq_loader.calib[image], intrinsic=INTRINSIC[image]) 
+                                     - bbox_np[0:2]) * resize_ratio).float()
 
         # process depth pcl
         for depth in self.args.input_dict['depth']:
             result[depth] = self.process_pcl(frame[depth], joints_3d, self.args.num_points, mask_limbs=self.args.mask_limbs, 
                                              pelvis_idx=pelvis_idx, mask_ratio=self.args.point_mask_ratio,
                                              num_mask_limbs=self.args.num_mask_limbs)
-            trans_mat[depth] = seq_loader.calib[depth]
+            trans_mat[depth] = trans_mat_2_tensor(seq_loader.calib[depth]).float()
             
         # process radar pcl
         radar_pcl = torch.Tensor([])
@@ -152,6 +158,7 @@ class mmBodyDataset():
         result['orig_img'] = orig_imgs
         result['bbox'] = bbox
         result['joints_2d'] = joints_2d
+        result['smpl_params'] = torch.from_numpy(np.concatenate((pose, betas))).float()
         
         return result
 
@@ -181,6 +188,7 @@ class HuMManDataset(mmBodyDataset):
         self.data_path = op.join(args.data_path, 'train') if args.train else op.join(args.data_path, 'test')
         self.resource = args.inputs
         self.smpl_model = kwargs.get('smpl_model', SMPL())
+        self.need_crop = args.need_crop
         self.init_index_map()
         
     def init_index_map(self):
@@ -213,7 +221,7 @@ class HuMManDataset(mmBodyDataset):
         trans_mat = {}
         # process image
         for image in self.args.input_dict['image']:
-            result[image] = self.process_image(frame[image], joints, seq_loader.calib[image])
+            result[image] = self.process_image(frame[image], joints, seq_loader.calib[image], need_crop=self.need_crop)[0]
             trans_mat[image] = seq_loader.calib[image]
 
         # process depth pcl
@@ -241,6 +249,7 @@ class BEHAVEDataset(mmBodyDataset):
         self.data_path = op.join(args.data_path, 'train') if args.train else op.join(args.data_path, 'test')
         self.resource = args.inputs
         self.smpl_model = kwargs.get('smpl_model', SMPL())
+        self.need_crop = args.need_crop
         self.init_index_map()
         
     def init_index_map(self):
@@ -274,13 +283,13 @@ class BEHAVEDataset(mmBodyDataset):
         trans_mat = {}
         # process image
         for image in self.args.input_dict['image']:
-            result[image] = self.process_image(frame[image], joints, seq_loader.calib[image])
-            trans_mat[image] = seq_loader.calib[image]
+            result[image] = self.process_image(frame[image], joints, seq_loader.calib[image], need_crop=self.need_crop)[0]
+            trans_mat[image] = trans_mat_2_tensor(seq_loader.calib[image]).float()
 
         # process depth pcl
         for depth in self.args.input_dict['depth']:
-            result[depth] = self.process_pcl(frame[depth], joints, self.args.num_points, mask_limbs=False, pelvis_idx=pelvis_idx)
-            trans_mat[depth] = seq_loader.calib[depth]
+            result[depth] = self.process_pcl(frame[depth], joints, self.args.num_points, mask_limbs=self.args.mask_limbs, pelvis_idx=pelvis_idx)
+            trans_mat[depth] = trans_mat_2_tensor(seq_loader.calib[depth]).float()
 
         # return result
         result['joints_3d'] = torch.from_numpy(joints).float()
@@ -372,6 +381,7 @@ class CLIFFDataset(mmBodyDataset):
         self.data_path = data_path
         self.labels = dict(np.load(os.path.join(self.data_path, 'cliffGT.npz')))
         self.smpl_model = SMPL()
+        self.need_crop = args.need_crop
         
     def __len__(self):
         return len(self.labels['imgname'])
@@ -403,7 +413,7 @@ class CLIFFDataset(mmBodyDataset):
         box_min, box_max = [np.where(p < img.shape[1::-1], p, img.shape[1::-1]) for p in [box_min, box_max]]
         crop_img = img[box_min[1]:box_max[1], box_min[0]:box_max[0]]
         crop_img = cv2.resize(crop_img, [self.img_res, self.img_res], interpolation=cv2.INTER_LINEAR)
-        trans_img = self.process_image(crop_img)
+        trans_img = self.process_image(crop_img)[0]
         result[self.args.joints_2d_loss] = trans_img
         crop_img = np.transpose(crop_img.astype('float32'), (2,0,1))/255.0
         crop_img = torch.from_numpy(crop_img).float()

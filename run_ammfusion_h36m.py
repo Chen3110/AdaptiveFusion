@@ -34,7 +34,7 @@ from src.utils.miscellaneous import mkdir, set_seed
 from src.utils.metric_logger import AverageMeter, EvalMetricsLogger
 from src.utils.metric_pampjpe import reconstruction_error
 import src.datasets.fusion_dataset as Datasets
-from src.utils.loss import LossManager
+from src.utils.loss_manager import LossManager
 from src.utils.renderer import Renderer, visualize_reconstruction, visualize_reconstruction_no_text, visualize_reconstruction_test
 from src.utils.visualization import EvaluateStreamPlot, O3DStreamPlot, pcl2box, pcl2sphere
 from azureml.core.run import Run
@@ -252,7 +252,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
     log_eval_metrics = EvalMetricsLogger()
 
     for iteration, data_dict in enumerate(train_dataloader):
-            # gc.collect()
+        # gc.collect()
         # torch.cuda.empty_cache()
         fusiuon_model.train()
         iteration += start_iter + 1
@@ -401,7 +401,7 @@ def run_train(args, train_dataloader, val_dataloader, fusiuon_model, smpl, mesh_
                 + '  mPVE: {:6.2f}, mPJPE: {:6.2f}, PAmPJPE: {:6.2f}, Data Count: {:6.2f}'.format(1000*val_mPVE, 1000*val_mPJPE, 1000*val_PAmPJPE, val_count)
             )
 
-            if val_PAmPJPE<log_eval_metrics.PAmPJPE or epoch%10==0:
+            if val_PAmPJPE < log_eval_metrics.PAmPJPE:
                 save_checkpoint(fusiuon_model, args, epoch, iteration)
                 log_eval_metrics.update(val_mPVE, val_mPJPE, val_PAmPJPE, epoch)
         
@@ -623,7 +623,7 @@ def main(args):
         synchronize()
 
     mkdir(args.output_dir)
-    logger = setup_logger("AMMFusion", args.output_dir, get_rank())
+    logger = setup_logger("AdaptiveFusion", args.output_dir, get_rank())
     set_seed(args.seed, args.num_gpus)
     logger.info("Using {} GPUs".format(args.num_gpus))
     args.inputs = args.inputs.replace(' ','').split(',')
@@ -640,10 +640,9 @@ def main(args):
     mesh_sampler = Mesh()
     # Load model
     trans_encoder = []
-
-    input_feat_dim = [int(item) for item in args.input_feat_dim.split(',')]
-    hidden_feat_dim = [int(item) for item in args.hidden_feat_dim.split(',')]
-    output_feat_dim = input_feat_dim[1:] + [args.output_dim]
+    input_feat_dim = [int(item) for item in args.input_feat_dim.split(',')] # '2051,512,128'
+    hidden_feat_dim = [int(item) for item in args.hidden_feat_dim.split(',')] # '1024,256,64'
+    output_feat_dim = input_feat_dim[1:] + [args.output_dim] 
 
     # which encoder block to have graph convs
     which_blk_graph = [int(item) for item in args.which_gcn.split(',')]
@@ -705,27 +704,27 @@ def main(args):
 
         
         # init ImageNet pre-trained backbone model
-        if args.arch=='hrnet':
+        if args.img_backbone=='hrnet':
             hrnet_yaml = 'models/hrnet/cls_hrnet_w40_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w40_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
             img_backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w40 model')
-        elif args.arch=='hrnet-w64':
+        elif args.img_backbone=='hrnet-w64':
             hrnet_yaml = 'models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
             hrnet_checkpoint = 'models/hrnet/hrnetv2_w64_imagenet_pretrained.pth'
             hrnet_update_config(hrnet_config, hrnet_yaml)
             img_backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             logger.info('=> loading hrnet-v2-w64 model')
         else:
-            print("=> using pre-trained model '{}'".format(args.arch))
-            img_backbone = models.__dict__[args.arch](pretrained=True)
+            print("=> using pre-trained model '{}'".format(args.img_backbone))
+            img_backbone = models.__dict__[args.img_backbone](pretrained=True)
             # remove the last fc layer
             img_backbone = torch.nn.Sequential(*list(img_backbone.children())[:-2])
 
         trans_encoder = torch.nn.Sequential(*trans_encoder)
         total_params = sum(p.numel() for p in trans_encoder.parameters())
-        logger.info('AMMFusion encoders total parameters: {}'.format(total_params))
+        logger.info('AdaptiveFusion encoders total parameters: {}'.format(total_params))
         backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
         logger.info('Backbone total parameters: {}'.format(backbone_total_params))
         
@@ -740,7 +739,7 @@ def main(args):
         
         backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
 
-        # build end-to-end AMMFusion network (backbone + multi-layer AMMFusion encoder)
+        # build end-to-end AdaptiveFusion network (backbone + multi-layer AdaptiveFusion encoder)
         Model = getattr(Models, args.model)
         _model = Model(args, backbone, trans_encoder)
 
@@ -781,7 +780,7 @@ def parse_args():
                         help="Yaml file with all data for training.")
     parser.add_argument("--val_yaml", default='human3.6m/valid.4images.yaml', type=str, required=False,
                         help="Yaml file with all data for validation.")
-    parser.add_argument("--num_workers", default=4, type=int, 
+    parser.add_argument("--num_workers", default=10, type=int, 
                         help="Workers in dataloader.")
     parser.add_argument("--img_scale_factor", default=1, type=int, 
                         help="adjust image resolution.") 

@@ -30,13 +30,15 @@ class EvalMetricsLogger(object):
         # define a upper-bound performance (worst case) 
         # numbers are in unit millimeter
         self.PAmPJPE = 100.0/1000.0
+        self.PAmPVE = 100.0/1000.0
         self.mPJPE = 100.0/1000.0
         self.mPVE = 100.0/1000.0
 
         self.epoch = 0
 
-    def update(self, mPVE, mPJPE, PAmPJPE, epoch):
+    def update(self, mPVE, mPJPE, PAmPJPE, PAmPVE, epoch):
         self.PAmPJPE = PAmPJPE
+        self.PAmPVE = PAmPVE
         self.mPJPE = mPJPE
         self.mPVE = mPVE
         self.epoch = epoch
