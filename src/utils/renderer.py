@@ -16,6 +16,9 @@ from opendr.renderer import ColoredRenderer, TexturedRenderer
 from opendr.lighting import LambertianPointLight
 import random
 
+import torch
+from torchvision.utils import make_grid
+
 
 # Rotate the points by a specified angle.
 def rotateY(points, angle):
@@ -277,7 +280,7 @@ def visualize_reconstruction(img, img_size, gt_kp, vertices, pred_kp, camera, re
     gt_joint = ((gt_kp[:, :2] + 1) * 0.5) * img_size
     pred_joint = ((pred_kp + 1) * 0.5) * img_size
     img_with_gt = draw_skeleton( img, gt_joint, draw_edges=False)
-    skel_img = draw_skeleton(img_with_gt, pred_joint)
+    skel_img = draw_skeleton(img_with_gt, pred_joint, draw_edges=False)
 
     combined = np.hstack([skel_img, rend_img])
 
@@ -480,6 +483,29 @@ def visualize_reconstruction_no_text(img, img_size, vertices, camera, renderer, 
     combined = np.hstack([img, rend_img])
 
     return combined
+
+
+def visualize_mesh(renderer, images, gt_keypoints_2d, pred_vertices, pred_camera, pred_keypoints_2d):
+    """Tensorboard logging."""
+    gt_keypoints_2d = gt_keypoints_2d.cpu().numpy()
+    to_lsp = list(range(1, 20))
+    rend_imgs = []
+    batch_size = pred_vertices.shape[0]
+    # Do visualization for the first 6 images of the batch
+    for i in range(min(batch_size, 10)):
+        img = images[i].cpu().numpy()
+        # Get LSP keypoints from the full list of keypoints
+        gt_keypoints_2d_ = gt_keypoints_2d[i, to_lsp]
+        pred_keypoints_2d_ = pred_keypoints_2d.cpu().numpy()[i, to_lsp]
+        # Get predict vertices for the particular example
+        vertices = pred_vertices[i].cpu().numpy()
+        cam = pred_camera[i].cpu().numpy()
+        # Visualize reconstruction and detected pose
+        rend_img = visualize_reconstruction(img, 224, gt_keypoints_2d_, vertices, pred_keypoints_2d_, cam, renderer)
+        rend_img = rend_img.transpose(2,0,1)
+        rend_imgs.append(torch.from_numpy(rend_img))
+    rend_imgs = make_grid(rend_imgs, nrow=1)
+    return rend_imgs
 
 
 def plot_one_line(ref, vertex, img, color_index, alpha=0.0, line_thickness=None):

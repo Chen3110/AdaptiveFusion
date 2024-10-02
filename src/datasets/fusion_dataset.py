@@ -2,12 +2,13 @@ import sys
 import cv2
 import os.path as op
 import numpy as np
-
+import logging
 import torch
 import torchvision.transforms as transforms
 from src.datasets.utils import *
 from src.modeling._smpl import SMPL, SMPLH36M
 
+logger = logging.getLogger(__name__)
 
 class mmBodyDataset():
     def __init__(self, args):
@@ -119,7 +120,7 @@ class mmBodyDataset():
         orig_imgs = {}
         trans_mat = {}
         bbox = {}
-        joints_2d = {}
+        joints_2d = []
         for image in self.args.input_dict['image']:
             orig_imgs[image] = frame[image].copy()
             result[image] = self.process_image(frame[image], joints_3d, seq_loader.calib[image], need_crop=self.need_crop)[0]
@@ -130,6 +131,7 @@ class mmBodyDataset():
                 resize_ratio = [self.img_res, self.img_res] / (bbox_np[2:] - bbox_np[:2])
                 joints_2d = torch.from_numpy((project_pcl(joints_3d, trans_mat=seq_loader.calib[image], intrinsic=INTRINSIC[image]) 
                                      - bbox_np[0:2]) * resize_ratio).float()
+                joints_2d = joints_2d.flip(1) / self.img_res * 2 - 1
 
         # process depth pcl
         for depth in self.args.input_dict['depth']:
@@ -173,8 +175,8 @@ class mmBodyDataset():
         try:
             result = self.load_data(seq_loader, frame_idx)
         except Exception as err:
-            print(idx, seq_path, frame_idx)
-            print(err)
+            logger.info("{}, {}, {}".format(idx, seq_path, frame_idx))
+            logger.info(err)
             sys.exit(1)
         return result
         # return self.load_data(seq_loader, frame_idx)
@@ -271,7 +273,7 @@ class BEHAVEDataset(mmBodyDataset):
         pose = np.concatenate((smpl_para['trans'], smpl_para['pose']))
         betas = smpl_para['betas']
         mesh = self.smpl_model(torch.from_numpy(pose[None]).float(), torch.from_numpy(betas[None]).float())
-        joints = copy2cpu(mesh['joints'][0])
+        joints_3d = copy2cpu(mesh['joints'][0])
         verts = copy2cpu(mesh['vertices'][0])
         result = {}
         
@@ -281,24 +283,43 @@ class BEHAVEDataset(mmBodyDataset):
         pelvis_idx = 0
             
         trans_mat = {}
+        orig_imgs = {}
+        bbox = {}
+        joints_2d = []
         # process image
         for image in self.args.input_dict['image']:
-            result[image] = self.process_image(frame[image], joints, seq_loader.calib[image], need_crop=self.need_crop)[0]
+            orig_imgs[image] = frame[image].copy()
+            result[image] = self.process_image(frame[image], joints_3d, seq_loader.calib[image], need_crop=self.need_crop)[0]
             trans_mat[image] = trans_mat_2_tensor(seq_loader.calib[image]).float()
+
+        for image in self.args.input_dict['image']:
+            orig_imgs[image] = frame[image].copy()
+            result[image] = self.process_image(frame[image], joints_3d, seq_loader.calib[image], need_crop=self.need_crop)[0]
+            trans_mat[image] = trans_mat_2_tensor(seq_loader.calib[image]).float()
+            bbox_np = frame['bbox{}'.format(image[-1])].reshape(-1)
+            bbox[image] = torch.from_numpy(bbox_np)
+            if self.args.joints_2d_loss == image:
+                resize_ratio = [self.img_res, self.img_res] / (bbox_np[2:] - bbox_np[:2])
+                joints_2d = torch.from_numpy((project_pcl(joints_3d, trans_mat=seq_loader.calib[image], intrinsic=INTRINSIC[image]) 
+                                     - bbox_np[0:2]) * resize_ratio).float()
+                joints_2d = joints_2d.flip(1) / self.img_res * 2 - 1
 
         # process depth pcl
         for depth in self.args.input_dict['depth']:
-            result[depth] = self.process_pcl(frame[depth], joints, self.args.num_points, mask_limbs=self.args.mask_limbs, pelvis_idx=pelvis_idx)
+            result[depth] = self.process_pcl(frame[depth], joints_3d, self.args.num_points, mask_limbs=self.args.mask_limbs, pelvis_idx=pelvis_idx)
             trans_mat[depth] = trans_mat_2_tensor(seq_loader.calib[depth]).float()
 
         # return result
-        result['joints_3d'] = torch.from_numpy(joints).float()
-        result['root_pelvis'] = torch.from_numpy(joints[pelvis_idx]).float()
+        result['joints_3d'] = torch.from_numpy(joints_3d).float()
+        result['root_pelvis'] = torch.from_numpy(joints_3d[pelvis_idx]).float()
         result['vertices'] = torch.from_numpy(verts).float()
         result['trans_mat'] = trans_mat
-
+        result['orig_img'] = orig_imgs
+        result['bbox'] = bbox
+        result['joints_2d'] = joints_2d
         result['joint_mask'] = joint_mask
         result['vert_mask'] = vert_mask
+        result['smpl_params'] = torch.from_numpy(np.concatenate((pose, betas))).float()
 
         return result
     

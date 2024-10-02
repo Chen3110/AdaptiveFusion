@@ -3,6 +3,7 @@ import datetime
 import os
 import time
 import sys
+import cv2
 import numpy as np
 from openpyxl import Workbook, load_workbook
 import torch
@@ -18,7 +19,6 @@ import src.utils.comm as utils
 import src.datasets.fusion_dataset as Datasets
 from src.utils.logger import setup_logger
 from src.utils.scheduler import WarmupMultiStepLR
-from src.utils.visualization import EvaluateStreamPlot, pcl2box
 import src.modeling.model as Models
 from torch.utils.tensorboard import SummaryWriter
 
@@ -26,17 +26,17 @@ from torch.utils.tensorboard import SummaryWriter
 def result_generator(args, data_dict, smpl_results, face):
     for i in range(len(data_dict['joints_3d'])):
         yield dict(
-            radar_pcl = dict(
+            radar0 = dict(
                 # mesh = pcl2box(data_dict['radar'][i][:,:3]) if data_dict['radar'].shape[1] else None,
                 pcl = c2c(data_dict['radar0'][i][:,:3]) if 'radar0' in args.inputs else None,
                 color = [0,0.8,0],
             ),
-            master_pcl = dict(
+            depth0 = dict(
                 # mesh = pcl2box(data_dict['master_depth'][i][:,:3]) if data_dict['master_depth'].shape[1] else None,
                 pcl = c2c(data_dict['depth0'][i][:,:3]) if 'depth0' in args.inputs else None,
                 color = np.asarray([59, 170, 235]) /255,
             ),
-            sub_pcl = dict(
+            depth1 = dict(
                 # mesh = pcl2box(data_dict['sub_depth'][i][:,:3]) if data_dict['sub_depth'].shape[1] else None,
                 pcl = c2c(data_dict['depth1'][i][:,:3]) if 'depth1' in args.inputs else None,
                 color = np.asarray([245, 157, 86]) /255,
@@ -130,7 +130,12 @@ def evaluate(args, model, body_model, loss_manager, criterions, data_loader, dev
     snapshot_path = os.path.join(args.output_dir, 'snapshot', args.test_scene)
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
-    plot = EvaluateStreamPlot(save_path=snapshot_path)
+    if args.visual:
+        from src.utils.visualization import EvaluateStreamPlot
+        plot = EvaluateStreamPlot(save_path=snapshot_path)
+    else:
+        from src.utils.renderer import Renderer, visualize_mesh
+        renderer = Renderer(faces=body_model.faces.cpu().numpy())
 
     with torch.no_grad():
         for iteration, data_dict in enumerate(metric_logger.log_every(data_loader, 100, header)):
@@ -194,6 +199,19 @@ def evaluate(args, model, body_model, loss_manager, criterions, data_loader, dev
             metric_logger.update(loss=loss.item())
             metric_logger.meters['loss'].update(loss, n=batch_size)
 
+            if not args.train and args.joints_2d_loss and iteration%100==0 and not args.visual:
+                pred_2d_joints = orthographic_projection(smpl_results['joints'][:,:22] - trans_gt[:,None], output_dict['pred_cam'])
+                visual_imgs_output = visualize_mesh(renderer,
+                                                    data_dict['orig_img'][args.joints_2d_loss].detach()/255.,
+                                                    data_dict['joints_2d'][:,:,:2].detach(),
+                                                    smpl_results['vertices'].detach(), 
+                                                    output_dict['pred_cam'].detach(),
+                                                    pred_2d_joints.detach())
+                visual_imgs = visual_imgs_output.permute(1,2,0).numpy()
+                temp_fname = os.path.join(args.output_dir, 'snapshot', 'pred_{}.jpg'.format(i))
+                print('save to ', temp_fname)
+                cv2.imwrite(temp_fname, np.asarray(visual_imgs * 255))
+                
             if args.visual and not args.train:
                 gen = result_generator(args, data_dict, smpl_results, body_model.f)
                 batch += 1

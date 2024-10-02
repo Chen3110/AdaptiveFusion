@@ -219,7 +219,7 @@ class AdaptiveFusion(nn.Module):
             x = self.cam_param_fc3(x)
             cam_param = x.transpose(1,2)
             cam_param = cam_param.squeeze()
-            pred_dict['camera'] = cam_param
+            pred_dict['pred_cam'] = cam_param
         
         return pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 
@@ -669,7 +669,7 @@ class AdaptiveFusionH36M(AdaptiveFusion):
             x = self.cam_param_fc3(x)
             cam_param = x.transpose(1,2)
             cam_param = cam_param.squeeze()
-            pred_dict['camera'] = cam_param
+            pred_dict['pred_cam'] = cam_param
         
         return pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 
@@ -1001,7 +1001,7 @@ class AdaptiveFusion_mRI(nn.Module):
             x = self.cam_param_fc3(x)
             cam_param = x.transpose(1,2)
             cam_param = cam_param.squeeze()
-            pred_dict['camera'] = cam_param
+            pred_dict['pred_cam'] = cam_param
         
         return pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 

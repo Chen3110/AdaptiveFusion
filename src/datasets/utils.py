@@ -122,11 +122,10 @@ class BEHAVESequenceLoader(object):
             calib[k]['K'] = np.array(v['K'])
         self.calib = {}
         for i in range(4):
-            if 'image{}'.format(i) in self.resource:
-                self.calib.update({
-                    'image{}'.format(i):calib['kinect{}'.format(i)],
-                    'depth{}'.format(i):calib['kinect{}'.format(i)],
-                })
+            self.calib.update({
+                'image{}'.format(i):calib['kinect{}'.format(i)],
+                'depth{}'.format(i):calib['kinect{}'.format(i)],
+            })
 
     def __len__(self):
         return len(os.listdir(os.path.join(self.seq_path, 'smpl_params'))) - self.skip_head - self.skip_tail
@@ -139,6 +138,8 @@ class BEHAVESequenceLoader(object):
                     'image{}'.format(i):cv2.imread(os.path.join(self.seq_path, 'crop_image', 'kinect{}'.format(i), 
                                                                 '{}.png'.format(idx+self.skip_head))),
                 })
+                result['bbox{}'.format(i)] = np.load(os.path.join(
+                    self.seq_path, 'bounding_box', 'kinect{}'.format(i), '{}.npy'.format(idx+self.skip_head)))
             if 'depth{}'.format(i) in self.resource:
                 result.update({
                     'depth{}'.format(i):np.load(os.path.join(self.seq_path, 'depth_pcl', 'kinect{}'.format(i), 
