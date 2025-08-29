@@ -4,7 +4,6 @@ azureml_core==1.43.0
 boto3==1.24.26
 botocore==1.27.26
 configer==1.3.1
-DingtalkChatbot==1.5.3
 dotmap==1.3.30
 easydict==1.9
 einops==0.4.1
