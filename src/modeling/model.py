@@ -129,7 +129,7 @@ class AdaptiveFusion(nn.Module):
             if not args.wo_MMM:
                 for image in args.input_dict['image']:
                     if image in inputs:
-                        image_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        image_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size), use_dirichlet=True)
                         image_mask = np.ones((batch_size, 1, 1, 1))
                         image_mask[image_mask_indices] = 0.0
                         image_mask = torch.from_numpy(image_mask).float().to(args.device)
@@ -138,7 +138,7 @@ class AdaptiveFusion(nn.Module):
                     
                 for depth in args.input_dict['depth']:
                     if depth in inputs:
-                        depth_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size))
+                        depth_mask_indices = gen_random_indices(batch_size, size=int(0.3*batch_size), use_dirichlet=True)
                         depth_mask = np.ones((batch_size, 1, 1))
                         depth_mask[depth_mask_indices] = 0.0
                         depth_mask = torch.from_numpy(depth_mask).float().to(args.device)
@@ -184,6 +184,10 @@ class AdaptiveFusion(nn.Module):
             feat_mask = torch.from_numpy(feat_mask).float().to(args.device)
             feat_mask = feat_mask.expand(batch_size, feat_dim, -1)
             local_feats *= feat_mask
+        if args.multimae:
+            feat_dim = local_feats.shape[1]
+            feat_mask_indices = gen_random_indices(feat_dim, size=49, use_dirichlet=True)
+            local_feats = local_feats[:, feat_mask_indices]
         if not args.wo_local_feat:
             # prepare input tokens including joint/vertex queries and local features
             features = torch.cat([features, local_feats], dim=1)
@@ -224,9 +228,9 @@ class AdaptiveFusion(nn.Module):
         return pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 
 
-class DeepFusion(nn.Module):
+class FUTR3D(nn.Module):
     def __init__(self, args, backbone, trans_encoder):
-        super(DeepFusion, self).__init__()
+        super(FUTR3D, self).__init__()
         self.image_backbone = backbone['image']
         self.depth_backbone = backbone['depth']
         self.radar_backbone = backbone['radar']
@@ -1006,7 +1010,7 @@ class AdaptiveFusion_mRI(nn.Module):
         return pred_dict, pred_3d_joints, pred_vertices_sub2, pred_vertices_sub, pred_vertices_full
 
 
-class DeepFusionPara(nn.Module):
+class DeepFusion(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args

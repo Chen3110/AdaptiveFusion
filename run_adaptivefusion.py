@@ -493,6 +493,7 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
     fusion_model.eval()
     smpl.eval()
     batch = 0
+    time_list = []
     with torch.no_grad():
         for i, data_dict in enumerate(val_loader):
             # compute output
@@ -512,9 +513,15 @@ def run_validate(args, val_loader, fusion_model, epoch, smpl, mesh_sampler):
                     
             for m in args.inputs:
                 data_dict[m] = data_dict[m].to(args.device)
-                
+            
+            start_time = time.time()
             # forward-pass
             pred_dict, pred_3d_joints, pred_verts_sub2, pred_vertices_sub, pred_vertices = fusion_model(args, data_dict, smpl, mesh_sampler)
+            end_time = time.time() - start_time
+            time_list.append(end_time)
+            if i % 100 == 0:
+                print('Batch inference time: {}'.format(sum(time_list)/len(time_list)))
+                time_list = []
 
             pred_3d_pelvis = pred_3d_joints[:,0,:]
             if args.dataset == 'Human36MDataset':
@@ -694,7 +701,6 @@ def main(args):
     start_epoch = 0
     if args.resume_checkpoint!=None and args.resume_checkpoint!='None':
         # if only run eval, load checkpoint
-        logger.info("Evaluation: Loading from checkpoint {}".format(args.resume_checkpoint))
         _model = torch.load(os.path.join(args.resume_checkpoint, 'model.bin'), map_location='cpu')
         # for fine-tuning or resume training or inference, load weights from checkpoint
         logger.info("Loading state dict from checkpoint {}".format(args.resume_checkpoint))
@@ -767,12 +773,6 @@ def main(args):
             print("=> using pre-trained model '{}'".format(args.img_backbone))
             img_backbone = ResNet50()
 
-        trans_encoder = torch.nn.Sequential(*trans_encoder)
-        total_params = sum(p.numel() for p in trans_encoder.parameters())
-        logger.info('AdaptiveFusion encoders total parameters: {}'.format(total_params))
-        backbone_total_params = sum(p.numel() for p in img_backbone.parameters())
-        logger.info('Backbone total parameters: {}'.format(backbone_total_params))
-        
         if args.pcd_backbone=='pointnet':
             if args.model == 'PointWImageFeat':
                 mlps = [2048,4096,4096,2048]
@@ -783,14 +783,27 @@ def main(args):
             radar_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=32, mlp=mlps.copy())
             depth_backbone = PointnetSAModule(npoint=args.num_clusters, radius=0.4, nsample=64, mlp=mlps.copy())
         elif args.pcd_backbone=='pointnext':
-            radar_backbone = PointNeXt()
-            depth_backbone = PointNeXt()
+            radar_backbone = PointNeXt('cfgs/pointnext-s.yaml')
+            depth_backbone = PointNeXt('cfgs/pointnext-s.yaml')
 
+        trans_encoder = torch.nn.Sequential(*trans_encoder)
+        total_params = sum(p.numel() for p in trans_encoder.parameters())
+        logger.info('AdaptiveFusion encoders total parameters: {}'.format(total_params))
+        image_backbone_params = sum(p.numel() for p in img_backbone.parameters())
+        logger.info('Image backbone parameters: {}'.format(image_backbone_params))
+        depth_backbone_params = sum(p.numel() for p in depth_backbone.parameters())
+        logger.info('Depth backbone parameters: {}'.format(depth_backbone_params))
+        radar_backbone_params = sum(p.numel() for p in radar_backbone.parameters())
+        logger.info('Radar backbone parameters: {}'.format(radar_backbone_params))
+        
         backbone = dict(radar=radar_backbone, image=img_backbone, depth=depth_backbone)
 
         # build end-to-end AdaptiveFusion network (backbone + multi-layer Fusion Transformer)
         Model = getattr(Models, args.model)
         _model = Model(args, backbone, trans_encoder)
+
+    model_params = sum(p.numel() for p in _model.parameters())
+    logger.info('Model parameters: {}'.format(model_params))
 
     # update configs to enable attention outputs
     if args.show_att:
@@ -888,7 +901,7 @@ def parse_args():
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument('--lr', "--learning_rate", default=1e-4, type=float, 
                         help="The initial lr.")
-    parser.add_argument("--num_train_epochs", default=50, type=int, 
+    parser.add_argument("--num_train_epochs", default=20, type=int, 
                         help="Total number of training epochs to perform.")
     parser.add_argument("--vertices_loss_weight", default=100.0, type=float)
     parser.add_argument("--joints_loss_weight", default=1000.0, type=float)
@@ -947,6 +960,7 @@ def parse_args():
     parser.add_argument('--wo_GIM', action="store_true")
     parser.add_argument('--wo_MMM', action="store_true")
     parser.add_argument('--feat_mask', action="store_true")
+    parser.add_argument('--multimae', action="store_true")
     parser.add_argument('--wo_local_feat', action="store_true")
     parser.add_argument('--show_att', action="store_true")
     parser.add_argument('--joint_id', type=int, default=0)
