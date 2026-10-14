@@ -1,3 +1,6 @@
+## Project Page
+https://chen3110.github.io/adaptivefusion/index.html
+
 ## Install
 
 Our codebase is developed based on [MeshGraphormer](https://github.com/microsoft/MeshGraphormer) and [MeshTransformer](https://github.com/microsoft/MeshTransformer). Please check [Install.md](https://github.com/microsoft/MeshGraphormer/blob/main/docs/INSTALL.md) to install the relevant dependencies. Please also consider citing them if you use this codebase.
